@@ -78,6 +78,7 @@ SortedTerms = Sequence[tuple["_DimMon", int]]
 # a mapping of `t` to `(e, tk)`.
 NormalizationRules = dict["_DimMon", tuple["_DimExpr", int]]
 
+
 class InconclusiveDimensionOperation(core.InconclusiveDimensionOperation):
   """Raised when we cannot conclusively compute with symbolic dimensions."""
 
@@ -525,10 +526,21 @@ class _DimExpr:
       after, t_k_after = scope._normalization_rules.get(t, (None, 0))
       if after is not None and t_k % t_k_after == 0:
         # We have t*t_k_after -> after.
-        # We subtract `t*t_k` and add `c * (- (t_k // t_k_after))`.
+        # We subtract `t*t_k` and add `after * (- (t_k // t_k_after))`.
         _DimExpr.add_coeff(new_coeffs, t, - t_k)
         for t2, tc2 in after._monomials_sorted:
           _DimExpr.add_coeff(new_coeffs, t2, tc2 * (t_k // t_k_after))
+      elif t.degree > 1:  # A product of factors; look up individually
+        for f, fexp in t.items():
+          f_after, f_k_after = scope._normalization_rules.get(_DimMon({f: fexp}), (None, 0))
+          if f_after is not None and t_k % f_k_after == 0:
+            # We subtract `t*t_k`.
+            _DimExpr.add_coeff(new_coeffs, t, - t_k)
+            t_without_f = t.divide(_DimMon({f: fexp}))
+            # And add `(t // f**fexp) * f_after * (- (t_k // f_k_after))`
+            for t2, tc2 in f_after._monomials_sorted:
+              _DimExpr.add_coeff(new_coeffs, t2.mul(t_without_f), tc2 * (t_k // f_k_after))
+            break
     new_terms = _DimExpr._coeff_dict_to_terms(new_coeffs)
     if not new_terms: return 0
     if new_terms[0][0].degree == 0: return new_terms[0][1]
@@ -644,15 +656,18 @@ class _DimExpr:
 
   def __str__(self):
     def _one_monomial(mon, c):
+      abs_c = abs(c)
+      sgn_c = "+" if c > 0 else "-"
       if mon.degree == 0:
-        return str(c)
-      if c == 1:
-        return str(mon)
-      return f"{c}*{mon}"
+        return f"{sgn_c} {abs_c}" if abs_c != 0 else "0"
+      if abs_c == 1:
+        return f"{sgn_c} {mon}"
+      return f"{sgn_c} {abs_c}*{mon}"
     # We print first the "larger" monomials, so that the constant is last.
-    res = " + ".join(_one_monomial(mon, c)
-                     for mon, c in self._monomials_sorted)
-    res = res.replace(" + -", " - ").replace(" - 1*", " - ")
+    res = " ".join(_one_monomial(mon, c)
+                   for mon, c in self._monomials_sorted)
+    if res[0:2] == "+ ":
+      res = res[2:]
     return res
 
   def __repr__(self):
@@ -1602,7 +1617,11 @@ class _Parser:
 
   def expr(self, tok: tokenize.TokenInfo) -> tuple[DimSize, tokenize.TokenInfo]:
     # A sum of monomials
-    next_m_negated = False
+    next_m_negated = (tok.exact_type == tokenize.MINUS)
+    if next_m_negated:
+      tok = self.next_tok()
+    elif tok.exact_type == tokenize.PLUS:
+      tok = self.next_tok()
     acc = None
     while True:
       m, tok = self.mon(tok)
