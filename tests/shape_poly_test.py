@@ -79,8 +79,7 @@ def _bounds(e: shape_poly.DimSize) -> tuple[float, float]:
     scope = e.scope
   else:
     scope = shape_poly.SymbolicScope()
-  decision = shape_poly_decision._DecisionByElimination(scope)
-  return decision.bounds(e, shape_poly.BoundsPrecision.BEST)
+  return shape_poly._bounds_decision(e, shape_poly.BoundsPrecision.BEST)
 
 def _assert_equal_bounds(tst: jtu.JaxTestCase,
                          e: shape_poly.DimSize,
@@ -725,7 +724,7 @@ class DimExprTest(jtu.JaxTestCase):
     def _m(e: shape_poly._DimExpr) -> shape_poly._DimMon:
       return e.to_monomial()
     Comparator = shape_poly.Comparator
-    decision = shape_poly_decision._DecisionByElimination(scope)
+    decision = shape_poly_decision._DecisionByElimination(scope).initialize()
 
     self.assertSetEqual(
         set(),
@@ -1085,8 +1084,7 @@ class DimExprTest(jtu.JaxTestCase):
     scope1 = shape_poly.SymbolicScope(assumptions1)
     a1, d1, m1 = shape_poly.symbolic_shape("a1, d1, m1", scope=scope1)
     # TODO: The incompleteness is due to the way we combine external constraints
-    self.assertEqual(_bounds(a1 - 4*d1),
-                     _expect(best=(1, 3), current=(1, 3)))  # a - 4d = m >= 1
+    self.assertEqual(_bounds(a1 - 4*d1), (1, 3))  # a - 4d = m >= 1
     self.assertEqual(_bounds(a1 - 2*d1), (3, np.inf))  # a - 2d = m + 2d >= 3
     # TODO: The incompleteness is due to the way we combine external constraints
     self.assertEqual(_bounds(a1),
@@ -1611,7 +1609,7 @@ class ShapePolyTest(jtu.JaxTestCase):
     # performance
     def f(x):  # x: i32[a, b]
       acc = 0
-      for start in range(0, 10):
+      for start in range(0, 50):
         slice = x[start::2]  # exercises floordiv and min
         acc += jnp.sum(slice, axis=0)
 
@@ -2989,11 +2987,33 @@ _POLY_SHAPE_TEST_HARNESSES = [
                 lambda x: lax.slice_in_dim(x, 0, x.shape[0], stride=2, axis=0),
                 arg_descriptors=[RandArg((13, 4), _f32)],
                 polymorphic_shapes=["b, ..."]),
-    # Not yet, the slice_in_dim does int(stride)
+    # TODO: Not yet, the slice_in_dim does int(stride)
     # PolyHarness("slice_in_dim", "stride=sym",
     #             lambda x: lax.slice_in_dim(x, 0, x.shape[0], stride=x.shape[0] // 4, axis=0),
     #             arg_descriptors=[RandArg((13, 4), _f32)],
     #             polymorphic_shapes=["b, ..."]),
+    PolyHarness("jnp_split", "idx_tuple_ct",
+                # The indices are a tuple with constants
+                lambda a: jnp.split(a, (2,)),
+                arg_descriptors=[RandArg((16,), _f32)],
+                polymorphic_shapes=["b + 4"]),
+    PolyHarness("jnp_split", "idx_tuple_poly",
+                # The indices are a tuple with poly expressions
+                lambda a: jnp.split(a, (a.shape[0] - 2,), axis=0),
+                arg_descriptors=[RandArg((16,), _f32)],
+                polymorphic_shapes=["b + 4"]),
+    PolyHarness("jnp_split", "idx_ct",
+                # A constant num_sections
+                lambda a: jnp.split(a, 2, axis=0),
+                arg_descriptors=[RandArg((16,), _f32)],
+                polymorphic_shapes=["2*b + 4"]),
+    PolyHarness("jnp_split", "idx_poly",
+                # A poly expression as num_sections
+                lambda a: jnp.split(a, a.shape[0] // 2, axis=0),
+                arg_descriptors=[RandArg((16,), _f32)],
+                polymorphic_shapes=["b + 4"],
+                expect_error=(ValueError,
+                              "jax.numpy.split with a symbolic number of sections is not supported")),
     PolyHarness("squeeze", "axis=empty",
                 jnp.squeeze,
                 arg_descriptors=[RandArg((5,), _f32), StaticArg(())],

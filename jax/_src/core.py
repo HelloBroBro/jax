@@ -491,7 +491,7 @@ def traverse_jaxpr_params(f, params):
           if type(p) in (Jaxpr, ClosedJaxpr)}
 
 
-def eval_jaxpr(jaxpr: Jaxpr, consts, *args, propagate_source_info=True):
+def eval_jaxpr(jaxpr: Jaxpr, consts, *args, propagate_source_info=True) -> list[Any]:
   def read(v: Atom) -> Any:
     return v.val if isinstance(v, Literal) else env[v]
 
@@ -1534,7 +1534,7 @@ def concrete_or_error(force: Any, val: Any, context=""):
     return force(val)
 
 def concrete_dim_or_error(val: Any, context=""):
-  """Like concrete_or_error(operator.index)."""
+  """Like concrete_or_error(operator.index), allowing symbolic dimensions."""
   if is_dim(val):
     return val
   else:
