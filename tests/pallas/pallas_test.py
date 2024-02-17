@@ -39,7 +39,7 @@ from jax.experimental.pallas.ops import layer_norm
 from jax.experimental.pallas.ops import rms_norm
 from jax.experimental.pallas.ops import softmax
 try:
-  from jax._src.pallas.triton.lowering import compile_jaxpr
+  from jax._src.pallas.triton.lowering import compile_jaxpr, _TRITON_COMPILE_VIA_XLA
   from jax.experimental.pallas import gpu as plgpu
 except ModuleNotFoundError:
   compile_jaxpr = None
@@ -133,7 +133,8 @@ class PallasTest(parameterized.TestCase):
       try:
         import triton  # noqa: F401
       except ImportError:
-        self.skipTest("Triton is not installed. Skipping PallasTest.")
+        if not _TRITON_COMPILE_VIA_XLA.value:
+          self.skipTest("Triton is not installed. Skipping PallasTest.")
     super().setUp()
     if compile_jaxpr:
       compile_jaxpr.cache_clear()
@@ -741,6 +742,9 @@ class PallasCallTest(PallasTest):
       self.skipTest("No Triton GPU.")
     if self.INTERPRET:
       raise unittest.SkipTest("No Triton compilation in interpreter mode.")
+    if _TRITON_COMPILE_VIA_XLA.value:
+      raise unittest.SkipTest("Triton is compiled via XLA.")
+
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
         grid=1)
