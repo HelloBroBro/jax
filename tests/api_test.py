@@ -523,7 +523,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
   def test_donate_args_info_aot(self):
     def fn(x, y):
-      return jax.tree_map(lambda i: i * 2, x), y * 2
+      return jax.tree.map(lambda i: i * 2, x), y * 2
 
     x = jax.device_put({"A": np.array(1.0), "B": np.array(2.0)},
                        jax.devices()[0])
@@ -9211,6 +9211,38 @@ class CustomVJPTest(jtu.JaxTestCase):
       return out
 
     g(1.)  # doesn't crash
+
+  def test_nones_representing_zeros_in_subtrees_returned_by_bwd(self):
+    # https://github.com/google/jax/issues/8356
+    @jax.custom_vjp
+    def f(x):
+      return x[0]
+
+    def f_fwd(x):
+      return f(x), None
+
+    def f_bwd(_, z_bar):
+      return (z_bar, (None, None)),
+
+    f.defvjp(f_fwd, f_bwd)
+
+    jax.grad(f)((1.0, (2.0, 3.0)))  # don't crash
+
+  def test_pytree_nones_returned_by_bwd(self):
+    @jax.custom_vjp
+    def f(x):
+      return x[0]
+
+    def f_fwd(x):
+      return f(x), None
+
+    def f_bwd(_, z_bar):
+      return (z_bar, (None, None)),
+
+    f.defvjp(f_fwd, f_bwd)
+
+    jax.grad(f)((1.0, (2.0, None)))  # don't crash
+
 
 
 def transpose_unary(f, x_example):

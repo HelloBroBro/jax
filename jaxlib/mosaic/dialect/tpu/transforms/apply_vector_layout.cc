@@ -2405,6 +2405,71 @@ LogicalResult vector_broadcast_rule(RewriteContext &ctx, Operation &op,
             .getOperation());
     broadcast_op.erase();
     return success();
+  } else if (layout_out.bitwidth() == 32 &&
+             broadcast_op.getSourceType().getIntOrFloatBitWidth() == 1) {
+    // Broadcasting the i1 scalar involves first converting i1 to i32, followed
+    // by broadcasting i32 to the target shape. Finally, the comparison with 0s
+    // yields the vmask.
+    auto src_i32 = builder.create<arith::ExtUIOp>(
+        broadcast_op.getLoc(), builder.getI32Type(), broadcast_op.getSource());
+    FAILUREOR_ASSIGN_OR_RETURN(
+        const VectorType native_vreg_ty,
+        getNativeVregType(src_i32.getType(), ctx.target_shape));
+    auto tile_i32 =
+        builder.create<vector::BroadcastOp>(native_vreg_ty, src_i32);
+    auto zeros = builder.create<arith::ConstantOp>(
+        broadcast_op.getLoc(), tile_i32.getType(),
+        DenseElementsAttr::get(tile_i32.getType(),
+                               builder.getI32IntegerAttr(0)));
+    auto tile =
+        builder.create<arith::CmpIOp>(arith::CmpIPredicate::ne, tile_i32, zeros)
+            .getResult();
+    const xla::Array<Value> dst_tiles(dst_tiles_shape, tile);
+    broadcast_op.replaceAllUsesWith(
+        assemble(builder, dst_ty, layout_out, dst_tiles, ctx.target_shape)
+            .getOperation());
+    broadcast_op.erase();
+    return success();
+  } else if (layout_out.bitwidth() < 32) {
+    CHECK_EQ(layout_out.bitwidth(),
+             broadcast_op.getSourceType().getIntOrFloatBitWidth());
+    // Broadcasting the scalar with narrower type involves first packing (32 /
+    // bitwidth) copies to i32, followed by broadcasting i32 to the target
+    // shape. Finally, bitcast i32 vector back to the original narrower type
+    // vector.
+    auto loc = broadcast_op.getLoc();
+    auto src_ty = broadcast_op.getSourceType();
+    auto bitwidth = src_ty.getIntOrFloatBitWidth();
+    auto unpacked_src = broadcast_op.getSource();
+    if (!src_ty.isSignlessInteger(bitwidth)) {
+      unpacked_src = builder.create<arith::BitcastOp>(
+          loc, builder.getIntegerType(bitwidth), unpacked_src);
+    }
+    auto src_i32 =
+        builder.create<arith::ExtUIOp>(loc, builder.getI32Type(), unpacked_src)
+            .getResult();
+    for (int i = 1; i < (32 / bitwidth); ++i) {
+      auto shift_width = builder.create<arith::ConstantOp>(
+          loc, builder.getIntegerAttr(builder.getI32Type(), i * bitwidth));
+      src_i32 = builder.create<arith::OrIOp>(
+          loc, src_i32,
+          builder.create<arith::ShLIOp>(loc, src_i32, shift_width));
+    }
+    FAILUREOR_ASSIGN_OR_RETURN(
+        const VectorType i32_vreg_ty,
+        getNativeVregType(src_i32.getType(), ctx.target_shape));
+    auto tile_i32 = builder.create<vector::BroadcastOp>(i32_vreg_ty, src_i32);
+
+    FAILUREOR_ASSIGN_OR_RETURN(const VectorType native_vreg_ty,
+                               getNativeVregType(src_ty, ctx.target_shape));
+    auto tile = builder.create<tpu::BitcastVregOp>(native_vreg_ty, tile_i32);
+
+    const xla::Array<Value> dst_tiles(dst_tiles_shape, tile);
+    broadcast_op.replaceAllUsesWith(
+        assemble(builder, dst_ty, layout_out, dst_tiles, ctx.target_shape)
+            .getOperation());
+    broadcast_op.erase();
+    return success();
   } else {
     FAILUREOR_ASSIGN_OR_RETURN(
         const VectorType native_vreg_ty,
@@ -3836,7 +3901,6 @@ FailureOr<Value> relayout(OpBuilder &builder, Value v, VectorLayout src,
     }
   }
 
-  // TODO(b/306692696) Generalize relayout from tiling (m, 128) to (8, 128).
   // Handle retiling from (1, 128) to (8, 128) for 32-bit data.
   if (src.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
       dst.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
@@ -3863,29 +3927,34 @@ FailureOr<Value> relayout(OpBuilder &builder, Value v, VectorLayout src,
     });
     src = dst;
     src_tiles = std::move(src_tiles_retiled);
-  } else if (  // Handle retiling from (2, 128) to (8, 128) for 32-bit data.
+  } else if (  // Handle retiling from (m, 128) to (8, 128) for 32-bit data
+               // where m < 8 and m is a power of 2.
+               // TODO(b/306692696) Generalize relayout from tiling (m, 128) to
+               // (8, 128) for any src_tiles.dimensions().
       src.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
       dst.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
       src.bitwidth() == 32 && src.offsets() == LayoutOffsets{0, 0} &&
       dst.offsets() == LayoutOffsets{0, 0} &&
-      src.tiling() == std::array<int64_t, 2>{2, 128} &&
-      dst.tiling() == std::array<int64_t, 2>{8, 128} &&
+      target_shape[0] % src.tiling()[0] == 0 &&
+      src.tiling()[1] == target_shape[1] && dst.tiling() == target_shape &&
       *(src_tiles.dimensions().end() - 2) == 1) {
     xla::Array<Value> src_tiles_retiled(
         dst.tileArrayShape(vty.getShape(), target_shape));
     src_tiles_retiled.Each(
         [&](const absl::Span<const int64_t> idx, Value *const new_src_tile) {
+          const int64_t tiles_per_vreg = src.tilesPerVreg(target_shape);
           const int64_t dst_col = idx.back();
-          const int64_t src_col = dst_col / 4;
-          const int64_t start_slane_idx = 2 * (dst_col % 4);
+          const int64_t src_col = dst_col / tiles_per_vreg;
+          const int64_t start_slane_idx =
+              src.tiling()[0] * (dst_col % tiles_per_vreg);
           SmallVector<int64_t> src_idx(toArrayRef(idx));
           src_idx.back() = src_col;
           Value src_tile = src_tiles(src_idx);
           if (start_slane_idx) {
             SmallVector<int32_t> slane_idxs;
-            slane_idxs.reserve(8);
-            for (int i = 0; i < 8; ++i) {
-              slane_idxs.push_back(start_slane_idx + (i % 2));
+            slane_idxs.reserve(target_shape[0]);
+            for (int i = 0; i < target_shape[0]; ++i) {
+              slane_idxs.push_back(start_slane_idx + (i % src.tiling()[0]));
             }
             const DenseI32ArrayAttr gather_indices =
                 builder.getDenseI32ArrayAttr(slane_idxs);
