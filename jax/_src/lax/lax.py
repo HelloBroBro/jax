@@ -3618,11 +3618,15 @@ def _select_transpose_rule(t, which, *cases):
                      for c in cases]
   else:
     zeros = full_like(t, 0)
-    return [None] + [
-        select(eq(which, _const(which, i)), t, zeros)
-        if ad.is_undefined_primal(case) else None
-        for i, case in enumerate(cases)
-    ]
+    if dtypes.dtype(which) == np.dtype(np.bool_):
+      ct0 = select(which, zeros, t) if ad.is_undefined_primal(cases[0]) else None
+      ct1 = select(which, t, zeros) if ad.is_undefined_primal(cases[1]) else None
+      return (None, ct0, ct1)
+    else:
+      return [None] + [
+          select(eq(which, _const(which, i)), t, zeros)
+          if ad.is_undefined_primal(case) else None for i, case in enumerate(cases)
+      ]
 
 def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   which, *cases = batched_args
@@ -5082,8 +5086,7 @@ class BIntRules:
     return handler
 
   @staticmethod
-  def global_sharded_result_handler(aval, out_sharding, committed,
-                                    is_out_sharding_from_xla):
+  def global_sharded_result_handler(aval, out_sharding, committed):
     phys_aval = core.physical_aval(aval)
     phys_handler_maker = pxla.global_result_handlers[core.ShapedArray]
 
@@ -5091,8 +5094,7 @@ class BIntRules:
       raise NotImplementedError  # TODO(mattjj)
     else:
       phys_sharding = out_sharding
-    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed,
-                                      is_out_sharding_from_xla)
+    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed)
 
     def handler(bufs):
       return core.DArray(aval, phys_handler(bufs))
@@ -5103,11 +5105,23 @@ class BIntRules:
     return hlo_sharding
 
   @staticmethod
+  def logical_op_sharding(aval, phys_sharding):
+    return phys_sharding
+
+  @staticmethod
   def convert_from(bint_dtype, other_dtype) -> bool:
     return other_dtype in (np.dtype('int32'), np.dtype('int64'))
 
   @staticmethod
   def convert_to(other_dtype, bint_dtype) -> bool:
     return other_dtype in (np.dtype('int32'), np.dtype('int64'))
+
+  @staticmethod
+  def replicate_trailing_dims(ctx, val: ir.Value, aval) -> ir.Value:
+    return val
+
+  @staticmethod
+  def check_replicated_trailing_dims(sharding: jax.sharding.GSPMDSharding, aval):
+    pass
 
 core.bint._rules = BIntRules
