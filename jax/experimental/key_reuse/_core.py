@@ -16,31 +16,120 @@ from __future__ import annotations
 
 from collections import defaultdict
 from functools import partial, reduce, wraps
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import jax
 from jax import lax
 from jax import tree_util
+from jax.interpreters import batching, mlir
 from jax._src import api_util
 from jax._src import config
 from jax._src import core
 from jax._src import linear_util as lu
 from jax._src import pjit
-from jax._src import pretty_printer as pp
 from jax._src import prng
 from jax._src import random
+from jax._src import source_info_util
 from jax._src import util
 from jax._src.ad_checkpoint import remat_p
 from jax._src.debugging import debug_callback_p
 from jax._src.interpreters import partial_eval as pe
 from jax._src.util import weakref_lru_cache
 
-from jax.experimental.key_reuse._common import (
-  consume_p, assert_consumed_value_p, KeyReuseError,
-  Sink, Source, Forward, KeyReuseSignature
-)
 from jax.experimental.shard_map import shard_map_p
 import numpy as np
+
+
+class Sink(NamedTuple):
+  idx: int
+  mask: bool | np.ndarray = True
+
+  def __repr__(self):
+    if isinstance(self.mask, bool) and self.mask:
+      return f"Sink({self.idx})"
+    else:
+      return f"Sink({self.idx}, mask={self.mask})"
+
+
+class Source(NamedTuple):
+  idx: int
+  mask: bool | np.ndarray = True
+
+  def __repr__(self):
+    if isinstance(self.mask, bool) and self.mask:
+      return f"Source({self.idx})"
+    else:
+      return f"Source({self.idx}, mask={self.mask})"
+
+class Forward(NamedTuple):
+  in_idx: int
+  out_idx: int
+
+
+class KeyReuseSignature(NamedTuple):
+  sinks: list[Sink]
+  sources: list[Source]
+  forwards: list[Forward] = []
+
+  def check_signature(self, *args, funcname="function", context=None):
+    for sink in self.sinks:
+      if not isinstance(args[sink.idx], prng.PRNGKeyArray):
+        continue
+      if np.any(args[sink.idx]._consumed & sink.mask):
+        msg = f"Previously-consumed key passed to {funcname} at index {sink.idx}"
+        if context:
+          msg += " {context}"
+        raise KeyReuseError(msg)
+
+  def update_consumption(self, args_in, args_out):
+    for sink in self.sinks:
+      arg = args_in[sink.idx]
+      if isinstance(arg, prng.PRNGKeyArray):
+        arg._consumed = arg._consumed | sink.mask
+    for arg in args_out:
+      if isinstance(arg, prng.PRNGKeyArray):
+        arg._consumed = True
+    for source in self.sources:
+      if isinstance(args_out[source.idx], prng.PRNGKeyArray):
+        args_out[source.idx]._consumed = ~np.asarray(source.mask)
+    for forward in self.forwards:
+      arg_in = args_in[forward.in_idx]
+      arg_out = args_out[forward.out_idx]
+      if isinstance(arg_in, prng.PRNGKeyArray) and isinstance(arg_out, prng.PRNGKeyArray):
+        arg_out._consumed = arg_in._consumed
+
+
+class KeyReuseError(RuntimeError):
+  pass
+
+consume_p = core.Primitive("consume")
+consume_p.def_impl(lambda x: x)
+consume_p.def_abstract_eval(lambda x: x)
+batching.defvectorized(consume_p)
+mlir.register_lowering(
+    consume_p,
+    mlir.lower_fun(lambda x: x, multiple_results=False))
+
+def consume(key):
+  """Consume the key and return a consumed copy."""
+  return consume_p.bind(key)
+
+
+assert_consumed_value_p = core.Primitive("assert_consumed_value")
+assert_consumed_value_p.def_impl(lambda x, *, value: x)
+assert_consumed_value_p.def_abstract_eval(lambda x, *, value: x)
+batching.defvectorized(assert_consumed_value_p)
+mlir.register_lowering(
+    assert_consumed_value_p,
+    mlir.lower_fun(lambda x, *, value: x, multiple_results=False))
+
+def assert_unconsumed(key):
+  """Assert that a key is unconsumed"""
+  assert_consumed_value_p.bind(key, value=False)
+
+def assert_consumed(key, value=True):
+  """Assert that a key is consumed"""
+  assert_consumed_value_p.bind(key, value=value)
 
 
 def _check_consumed_value(eqn, consumed):
@@ -144,40 +233,35 @@ def get_jaxpr_type_signature(jaxpr: core.Jaxpr) -> KeyReuseSignature:
     return consumed.get(var, False)
 
   for eqn in jaxpr.eqns:
-    if eqn.primitive in key_reuse_signatures:
-      signature = key_reuse_signatures[eqn.primitive]
-    elif eqn.primitive in key_reuse_signatures_dynamic:
-      signature = key_reuse_signatures_dynamic[eqn.primitive](eqn)
-    else:
-      signature = unknown_signature(eqn)
+    traceback = eqn.source_info.traceback
+    name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
+    with source_info_util.user_context(traceback, name_stack=name_stack):
+      if eqn.primitive in key_reuse_signatures:
+        signature = key_reuse_signatures[eqn.primitive]
+      elif eqn.primitive in key_reuse_signatures_dynamic:
+        signature = key_reuse_signatures_dynamic[eqn.primitive](eqn)
+      else:
+        signature = unknown_signature(eqn)
 
-    if eqn.primitive == assert_consumed_value_p:
-      # This is a special case that goes beyond normal key reuse logic.
-      _check_consumed_value(eqn, is_consumed(eqn.invars[0]))
+      if eqn.primitive == assert_consumed_value_p:
+        # This is a special case that goes beyond normal key reuse logic.
+        _check_consumed_value(eqn, is_consumed(eqn.invars[0]))
 
-    for in_idx, out_idx in signature.forwards:
-      forwards[eqn.outvars[out_idx]] = eqn.invars[in_idx]
+      for in_idx, out_idx in signature.forwards:
+        forwards[eqn.outvars[out_idx]] = eqn.invars[in_idx]
 
-    for snk in signature.sinks:
-      if not 0 <= snk.idx < len(eqn.invars):
-        raise KeyReuseError(f"In {eqn.primitive}, sink {snk.idx} out of range [0, {len(eqn.invars)}]")
-      if sink(eqn.invars[snk.idx], snk.mask):
-        context = core.JaxprPpContext()
-        settings = core.JaxprPpSettings()
-        jaxpr_str = core.pp_jaxpr(jaxpr, context, settings).format()
-        eqn_str = core.pp_eqn(eqn, context, settings).format()
-        key_vals_str = core.pp_var(eqn.invars[snk.idx], context).format()
-        raise KeyReuseError(f"In {eqn.primitive}, key values {key_vals_str} are already consumed.\n"
-                            f"  signature: {signature}\n"
-                            f"  eqn: {eqn_str}\n"
-                            f"  jaxpr:\n{jaxpr_str}")
-    for var in eqn.outvars:
-      if not isinstance(var, core.Literal) and var not in forwards:
-        source(var, True)  # consumed unless in a Source.
-    for src in signature.sources:
-      if not 0 <= src.idx < len(eqn.outvars):
-        raise KeyReuseError(f"In {eqn.primitive}, source {src.idx} out of range [0, {len(eqn.outvars)}]")
-      source(eqn.outvars[src.idx])
+      for snk in signature.sinks:
+        if not 0 <= snk.idx < len(eqn.invars):
+          raise KeyReuseError(f"In {eqn.primitive}, sink {snk.idx} out of range [0, {len(eqn.invars)}]")
+        if sink(eqn.invars[snk.idx], snk.mask):
+          raise KeyReuseError(f"In {eqn.primitive}, argument {snk.idx} is already consumed.")
+      for var in eqn.outvars:
+        if not isinstance(var, core.Literal) and var not in forwards:
+          source(var, True)  # consumed unless in a Source.
+      for src in signature.sources:
+        if not 0 <= src.idx < len(eqn.outvars):
+          raise KeyReuseError(f"In {eqn.primitive}, source {src.idx} out of range [0, {len(eqn.outvars)}]")
+        source(eqn.outvars[src.idx])
 
   return KeyReuseSignature(
     sinks=[Sink(i, consumed[v]) for i, v in enumerate(jaxpr.invars)
@@ -341,17 +425,20 @@ def key_reuse_impl_rule(prim, original_rule):
   def key_reuse_impl(*args, **kwargs):
     if config.enable_key_reuse_checks.value:
       if prim == pjit.pjit_p:
+        funcname = "jit-compiled function"
         jaxpr = kwargs['jaxpr'].jaxpr
         signature = get_jaxpr_type_signature(jaxpr)
       elif prim in key_reuse_signatures:
-        jaxpr = prim
+        funcname = str(prim)
+        jaxpr = None
         signature = key_reuse_signatures[prim]
       elif prim in key_reuse_signatures_dynamic:
+        funcname = str(prim)
         jaxpr = jax.make_jaxpr(partial(prim.bind, **kwargs))(*args).jaxpr
         signature = get_jaxpr_type_signature(jaxpr)
       else:
         raise RuntimeError(f"Internal: no key reuse rule for primitive {prim}")
-      signature.check_signature(*args, jaxpr=jaxpr)
+      signature.check_signature(*args, funcname=funcname)
       result =  original_rule(*args, **kwargs)
       signature.update_consumption(args, result if prim.multiple_results else [result])
       return result
