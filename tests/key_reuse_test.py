@@ -209,6 +209,18 @@ class KeyReuseUnitTestWithForwarding(jtu.JaxTestCase):
       assert_consumed(key2)
     self.check_key_reuse(f, jax.random.key(0))
 
+  def test_concatenate(self):
+    def f(key1, key2):
+      assert_unconsumed(key1)
+      assert_unconsumed(key2)
+      keys = jax.lax.concatenate([key1, key2], dimension=0)
+      assert_consumed(key1)
+      assert_consumed(key2)
+      assert_unconsumed(keys)
+    key1 = jax.random.split(jax.random.key(0))
+    key2 = jax.random.split(jax.random.key(1))
+    self.check_key_reuse(f, key1, key2)
+
   def test_slice(self):
     def f(keys):
       assert_unconsumed(keys)
@@ -691,6 +703,15 @@ class KeyReuseImplementationTest(jtu.JaxTestCase):
       KeyReuseSignature(), KeyReuseSignature())
     self.assertNotEquivalent(
       KeyReuseSignature(Source(0)), KeyReuseSignature(Sink(0)))
+
+  def test_reprs(self):
+    self.assertEqual(repr(Sink(0)), "Sink(0)")
+    self.assertEqual(repr(Source(0)), "Source(0)")
+    self.assertEqual(repr(Forward(0, 1)), "Forward(0, 1)")
+    self.assertEqual(repr(KeyReuseSignature(Sink(1), Source(0))),
+                     "KeyReuseSignature(Sink(1), Source(0))")
+    self.assertEqual(repr(KeyReuseSignature(Sink(1), Sink(0))),
+                     "KeyReuseSignature(Sink(0), Sink(1))")
 
 
 
