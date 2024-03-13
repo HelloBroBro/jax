@@ -715,8 +715,8 @@ triton_lowering_rules.update({
     lax.atan2_p: _extern_elementwise(
         "atan2",
         [
-            _Extern(["float32"], "__nv_atan2f", "float32"),
-            _Extern(["float64"], "__nv_atan2", "float64"),
+            _Extern(["float32", "float32"], "__nv_atan2f", "float32"),
+            _Extern(["float64", "float64"], "__nv_atan2", "float64"),
         ],
     ),
     lax.sinh_p: _extern_elementwise(
@@ -750,7 +750,7 @@ triton_lowering_rules.update({
     lax.acosh_p: _extern_elementwise(
         "acosh",
         [
-            _Extern(["float32"], "__nv_acosf", "float32"),
+            _Extern(["float32"], "__nv_acoshf", "float32"),
             _Extern(["float64"], "__nv_acosh", "float64"),
         ],
     ),
@@ -765,21 +765,21 @@ triton_lowering_rules.update({
         "population_count",
         [
             _Extern(["int32"], "__nv_popc", "int32"),
-            _Extern(["int64"], "__nv_popcll", "int64"),
+            _Extern(["int64"], "__nv_popcll", "int32"),
         ],
     ),
     lax.clz_p: _extern_elementwise(
         "clz",
         [
             _Extern(["int32"], "__nv_clz", "int32"),
-            _Extern(["int64"], "__nv_clzll", "int64"),
+            _Extern(["int64"], "__nv_clzll", "int32"),
         ],
     ),
     lax.nextafter_p: _extern_elementwise(
         "nextafter",
         [
-            _Extern(["float32", "float32"], "_nv_nextafterf", "float32"),
-            _Extern(["float64", "float64"], "_nv_nextafter", "float64"),
+            _Extern(["float32", "float32"], "__nv_nextafterf", "float32"),
+            _Extern(["float64", "float64"], "__nv_nextafter", "float64"),
         ],
     ),
 })
@@ -837,7 +837,10 @@ def _mul(x: ir.Value, y: ir.Value) -> ir.Value:
 
 def _floordiv(x: ir.Value, y: ir.Value, *, signed: bool) -> ir.Value:
   assert x.type == y.type, (str(x.type), str(y.type))
-  if not isinstance(_element_type(x.type), ir.IntegerType):
+  x_element_type = _element_type(x.type)
+  if isinstance(x_element_type, ir.FloatType):
+    return arith_dialect.divf(x, y)
+  if not isinstance(x_element_type, ir.IntegerType):
     raise NotImplementedError(f"unsupported types: {x.type} and {y.type}")
   if signed:
     return arith_dialect.divsi(x, y)
@@ -859,7 +862,10 @@ def _truediv(x: ir.Value, y: ir.Value, *, signed: bool) -> ir.Value:
 
 def _mod(x: ir.Value, y: ir.Value, *, signed: bool) -> ir.Value:
   assert x.type == y.type, (str(x.type), str(y.type))
-  if not isinstance(_element_type(x.type), ir.IntegerType):
+  x_element_type = _element_type(x.type)
+  if isinstance(x_element_type, ir.FloatType):
+    return arith_dialect.remf(x, y)
+  if not isinstance(x_element_type, ir.IntegerType):
     raise NotImplementedError(f"unsupported types: {x.type} and {y.type}")
   if signed:
     return arith_dialect.remsi(x, y)
@@ -1106,6 +1112,19 @@ def _div_lowering_rule(ctx: LoweringRuleContext, x, y):
 
 
 triton_lowering_rules[lax.div_p] = _div_lowering_rule
+
+
+def _sign_lowering_rule(ctx: LoweringRuleContext, x):
+  [x_aval] = ctx.avals_in
+  signed = np.issubdtype(x_aval.dtype, jnp.signedinteger)
+  zero = _full(x.type, 0)
+  return _sub(
+      _cast(_greater_than(x, zero, signed=signed), x.type, signed=signed),
+      _cast(_less_than(x, zero, signed=signed), x.type, signed=signed),
+  )
+
+
+triton_lowering_rules[lax.sign_p] = _sign_lowering_rule
 
 
 def _iota_lowering_rule(ctx: LoweringRuleContext, *, dtype, shape, dimension):

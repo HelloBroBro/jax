@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import functools
 import itertools
 import os
@@ -1517,7 +1518,60 @@ class PallasCallVmapTest(PallasTest):
 class PallasCallInterpreterVmapTest(PallasCallVmapTest):
   INTERPRET = True
 
+
 class PallasOpsTest(PallasTest):
+
+  ELEMENTWISE_OPS = [
+      ([jnp.abs, jnp.negative], ["int32", "int64", "float32", "float64"]),
+      (
+          # fmt: off
+          [jnp.ceil, jnp.floor, jnp.exp, jnp.exp2, jnp.expm1, jnp.log1p,
+           jnp.sqrt, jnp.cbrt, lax.rsqrt, jnp.sin, jnp.cos, jnp.tan, jnp.asin,
+           jnp.acos, jnp.atan, jnp.sinh, jnp.cosh, jnp.tanh, jnp.asinh,
+           jnp.acosh, jnp.atanh],
+          # fmt: on
+          ["float32", "float64"]
+      ),
+      ([lax.population_count, lax.clz], ["int32", "int64"]),
+  ]
+
+  @parameterized.named_parameters(
+      (f"{fn.__name__}_{dtype}", fn, dtype)
+      for args in ELEMENTWISE_OPS
+      for fn, dtype in itertools.product(*args)
+  )
+  def test_elementwise(self, fn, dtype):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), dtype), grid=1
+    )
+    def kernel(x_ref, o_ref):
+      o_ref[:] = fn(x_ref[...])
+
+    with contextlib.ExitStack() as stack:
+      if jnp.dtype(dtype).itemsize == 8:
+        stack.enter_context(config.enable_x64(True))
+      x = jnp.array([4.2, 2.4]).astype(dtype)
+      np.testing.assert_allclose(kernel(x), fn(x), rtol=1e-6)
+
+  @parameterized.parameters(
+      ("float32", "int32"),
+      ("float64", "int32"),
+      ("float32", "float32"),
+      ("float64", "float64"),
+  )
+  def test_pow(self, x_dtype, y_dtype):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), x_dtype), grid=1
+    )
+    def kernel(x_ref, y_ref, o_ref):
+      o_ref[:] = lax.pow(x_ref[...], y_ref[...])
+
+    with contextlib.ExitStack() as stack:
+      if jnp.dtype(x_dtype).itemsize == 8:
+        stack.enter_context(config.enable_x64(True))
+      x = jnp.array([1, 2, 3, 4]).astype(x_dtype)
+      y = jnp.array([1, 2, 3, 4]).astype(y_dtype)
+      np.testing.assert_allclose(kernel(x, y), lax.pow(x, y))
 
   def test_pow_weak_dtype(self):
     @functools.partial(
@@ -1528,17 +1582,46 @@ class PallasOpsTest(PallasTest):
     x = jnp.array(42.0)
     np.testing.assert_allclose(square(x), x*x)
 
-  def test_ne(self):
+  @parameterized.parameters("float32", "float64")
+  def test_nextafter(self, dtype):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), dtype), grid=1
+    )
+    def kernel(x_ref, y_ref, o_ref):
+      o_ref[:] = jnp.nextafter(x_ref[...], y_ref[...])
+
+    with contextlib.ExitStack() as stack:
+      if jnp.dtype(dtype).itemsize == 8:
+        stack.enter_context(config.enable_x64(True))
+      x = jnp.array([1, 2, 3, 4]).astype(dtype)
+      y = jnp.array([1, 2, 3, 4]).astype(dtype)
+      np.testing.assert_allclose(kernel(x, y), jnp.nextafter(x, y))
+
+  COMPARISON_OPS = [
+      jnp.equal,
+      jnp.not_equal,
+      jnp.less,
+      jnp.less_equal,
+      jnp.greater,
+      jnp.greater_equal,
+  ]
+
+  @parameterized.named_parameters(
+      (f"{fn.__name__}_{dtype}", fn, dtype)
+      for fn, dtype in itertools.product(
+          COMPARISON_OPS, ["int32", "uint32", "float32"]
+      )
+  )
+  def test_comparison(self, fn, dtype):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.bool_),
         grid=1)
-    def ne(x_ref, y_ref, o_ref):
-      o_ref[:] = x_ref[...] != y_ref[...]
+    def kernel(x_ref, y_ref, o_ref):
+      o_ref[:] = fn(x_ref[...], y_ref[...])
 
-    x = jnp.ones(8, dtype=jnp.int32)
-    y = jnp.arange(8, dtype=jnp.int32)
-    not_equal = ne(x, y)
-    np.testing.assert_allclose(not_equal, x != y)
+    x = jnp.array([1, 3, -4, -6, 2, 5, 4, -7]).astype(dtype)
+    y = jnp.array([3, 1, -4, -5, 2, -2, 2, 4]).astype(dtype)
+    np.testing.assert_allclose(kernel(x, y), fn(x, y))
 
   def test_isnan(self):
     @functools.partial(
@@ -1551,33 +1634,52 @@ class PallasOpsTest(PallasTest):
     x = x.at[3].set(jnp.nan)
     np.testing.assert_allclose(isnan(x), jnp.isnan(x))
 
-  @parameterized.named_parameters(*(
-      (fn.__name__, fn, out_dtype)
-      for fn, out_dtype in [
-          (jnp.add, jnp.int32),
-          (jnp.subtract, jnp.int32),
-          (jnp.multiply, jnp.int32),
-          (jnp.true_divide, jnp.float32),
-          (jnp.remainder, jnp.int32),
-          (jnp.less, jnp.bool_),
-          (jnp.less_equal, jnp.bool_),
-          (jnp.greater, jnp.bool_),
-          (jnp.greater_equal, jnp.bool_),
-          (jnp.equal, jnp.bool_),
-          (jnp.not_equal, jnp.bool_),
-      ]
-  ))
-  def test_signed_int_ops(self, f, out_dtype):
+  def test_true_divide(self):
     @functools.partial(
         self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((8,), out_dtype),
-        grid=1)
-    def f_i32(x_ref, y_ref, o_ref):
+        out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        grid=1,
+    )
+    def kernel(x_ref, y_ref, o_ref):
+      o_ref[...] = jnp.true_divide(x_ref[...], y_ref[...])
+
+    x = jnp.array([1, 3, -4, -6, 2, 5, 4, -7], dtype=jnp.int32)
+    y = jnp.array([3, 1, -4, -5, 2, -2, 2, 4], dtype=jnp.int32)
+    np.testing.assert_allclose(jnp.true_divide(x, y), kernel(x, y))
+
+  BINARY_OPS = [
+      ([jnp.floor_divide], ["int32", "uint32"]),
+      (
+          [jnp.add, jnp.subtract, jnp.multiply, jnp.remainder],
+          ["int32", "uint32", "float32"],
+      ),
+      (
+          [
+              jnp.bitwise_and,
+              jnp.bitwise_or,
+              jnp.bitwise_xor,
+              jnp.bitwise_left_shift,
+              jnp.bitwise_right_shift,
+          ],
+          ["int32", "uint32"],
+      ),
+  ]
+
+  @parameterized.named_parameters(
+      (f"{fn.__name__}_{dtype}", fn, dtype)
+      for args in BINARY_OPS
+      for fn, dtype in itertools.product(*args)
+  )
+  def test_binary(self, f, dtype):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), dtype), grid=1
+    )
+    def kernel(x_ref, y_ref, o_ref):
       o_ref[...] = f(x_ref[...], y_ref[...])
 
-    x = jnp.int32([1, 3, -4, -6, 2, 5, 4, -7])
-    y = jnp.int32([3, 1, -4, -5, 2, -2, 0, 4])
-    np.testing.assert_allclose(f(x, y), f_i32(x, y))
+    x = jnp.array([1, 3, -4, -6, 2, 5, 4, -7]).astype(dtype)
+    y = jnp.array([3, 1, -4, -5, 2, -2, 2, 4]).astype(dtype)
+    np.testing.assert_allclose(f(x, y), kernel(x, y))
 
 
 class PallasOpsInterpretTest(PallasOpsTest):
