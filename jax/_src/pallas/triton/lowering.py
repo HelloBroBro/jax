@@ -517,10 +517,7 @@ triton_lowering_rules[lax.cumsum_p] = _cumsum_lowering_rule
 
 def _not_lowering_rule(ctx: LoweringRuleContext, x):
   [x_aval] = ctx.avals_in
-  if not np.issubdtype(x_aval.dtype, jnp.integer):
-    raise NotImplementedError(f"unsupported type: {x_aval.dtype}")
-  one = _full(x.type, 0xFFFFFFFFFFFFFFFF)
-  return arith_dialect.xori(x, one)
+  return arith_dialect.xori(x, _full(x.type, ~x_aval.dtype.type(0)))
 
 
 triton_lowering_rules[lax.not_p] = _not_lowering_rule
@@ -1525,14 +1522,6 @@ def _compute_pointers_from_indices(
 
   return functools.reduce(
       _add, bcast_indices, _bcast_to(root_ptr, indexer_shape)
-  )
-
-
-def _pack_indices(non_slice_idx, indexed_dims):
-  non_slice_idx_iter = iter(non_slice_idx)
-  return tuple(
-      next(non_slice_idx_iter) if indexed else slice(None)
-      for indexed in indexed_dims
   )
 
 

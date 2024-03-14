@@ -568,7 +568,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       return np.matmul(x, y).astype(dtype)
     args_maker = lambda: [rng(lhs_shape, lhs_dtype), rng(rhs_shape, rhs_dtype)]
     tol = {np.float16: 1e-2, np.float32: 2e-2, np.float64: 1e-12,
-           np.complex128: 1e-12}
+           np.complex128: 1e-12, jnp.bfloat16: 1e-1}
 
     with jtu.strict_promotion_if_dtypes_match([lhs_dtype, rhs_dtype]):
       self._CheckAgainstNumpy(np_fun, jnp.matmul, args_maker, tol=tol)
@@ -603,7 +603,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       return f(x, y, axis=axis).astype(x.dtype)
     jnp_fn = partial(jnp.vecdot, axis=axis)
     tol = {np.float16: 1e-2, np.float32: 1E-3, np.float64: 1e-12,
-           np.complex64: 1E-3, np.complex128: 1e-12}
+           np.complex64: 1E-3, np.complex128: 1e-12, jnp.bfloat16: 1e-1}
     self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=tol)
     self._CompileAndCheck(jnp_fn, args_maker, tol=tol)
 
@@ -4396,7 +4396,8 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_fun, args_maker)
 
   @jtu.sample_product(
-    shape=all_shapes, dtype=all_dtypes,
+    shape=all_shapes,
+    dtype=all_dtypes,
   )
   def testWhereOneArgument(self, shape, dtype):
     rng = jtu.rand_some_zero(self.rng())
@@ -4432,17 +4433,11 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     def f(x):
       return jnp.where(x > 0, x, -x)
 
+    jaxpr = jax.make_jaxpr(jax.grad(f))(3.)
     # Test no comparison literal True/False in jaxpr, and hence no comparison to
     # literals
-    jaxpr = jax.make_jaxpr(jax.grad(f))(3.)
     self.assertNotIn('False', str(jaxpr))
     self.assertNotIn('True', str(jaxpr))
-
-    # But if we set the option off, we get the old behavior.
-    with config.new_select_transpose(False):
-      jaxpr = jax.make_jaxpr(jax.grad(f))(3.)
-    self.assertIn('False', str(jaxpr))
-    self.assertIn('True', str(jaxpr))
 
   def testWhereScalarPromotion(self):
     x = jnp.where(jnp.array([True, False]), 3,
