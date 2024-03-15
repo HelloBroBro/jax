@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Pallas utility functions."""
+
 from jax import lax
 from jax._src import core as jax_core
 from jax._src.util import split_list
@@ -44,7 +45,10 @@ def strides_from_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def next_power_of_2(x: int) -> int:
-  return 2**x.bit_length()
+  """Returns the next power of two greater than or equal to `x`."""
+  if x < 0:
+    raise ValueError("`next_power_of_2` requires a non-negative integer.")
+  return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
 
 def pattern_match_scan_to_fori_loop(
