@@ -2374,6 +2374,20 @@ class APITest(jtu.JaxTestCase):
     self.assertAllClose(pytree[0], jnp.array(1.), check_dtypes=False)
     self.assertAllClose(pytree[1], np.ones(3), check_dtypes=False)
 
+  def test_block_until_ready_numpy_arrays(self):
+    pytree = (np.ones(1), np.ones(2))
+    pytree = jax.block_until_ready(pytree)
+    self.assertAllClose(pytree[0], np.ones(1), check_dtypes=False)
+    self.assertAllClose(pytree[1], np.ones(2), check_dtypes=False)
+
+  def test_block_until_ready_mixed(self):
+    pytree = (device_put(1.), device_put(2.), np.ones(3), 4)
+    pytree = jax.block_until_ready(pytree)
+    self.assertAllClose(pytree[0], jnp.array(1.), check_dtypes=False)
+    self.assertAllClose(pytree[1], jnp.array(2.), check_dtypes=False)
+    self.assertAllClose(pytree[2], np.ones(3), check_dtypes=False)
+    self.assertEqual(pytree[3], 4)
+
   def test_devicearray_weakref_friendly(self):
     x = device_put(1.)
     y = weakref.ref(x)
@@ -4564,6 +4578,34 @@ class APITest(jtu.JaxTestCase):
     a = weakref.ref(A())
     gc.collect()
     assert a() is None
+
+  def test_forwarding_bug(self):
+    # Test for issue #20267.
+    def f(x):
+        @jax.jit
+        def inner(a, x):
+            return a, jnp.exp(x)
+        return inner(0., x)[0]
+    jax.grad(f)(1.)  # don't crash
+
+  @parameterized.parameters(it.product(range(4), repeat=3))
+  @jtu.run_on_devices("cpu")
+  def test_jit_forwarding_correctness(self, seed, num_input_fwd, num_output_fwd):
+    num_args = 3
+    rng = np.random.RandomState(seed)
+    in_perm = rng.permutation(num_args)
+    out_perm = rng.permutation(num_args)
+
+    @jax.jit
+    def f(inputs):
+      inputs = [inputs[i] for i in in_perm]
+      outputs = inputs[:num_input_fwd] + [
+          jnp.exp(inputs[i]) if i < num_output_fwd else jnp.sin(inputs[i])
+          for i in range(num_args - num_input_fwd)]
+      return [outputs[i] for i in out_perm]
+
+    jtu.check_grads(f, (list(jnp.arange(float(num_args))),), order=1,
+                    modes=['rev'], atol=1e-3, rtol=1e-3)
 
 
 class RematTest(jtu.JaxTestCase):
@@ -9288,7 +9330,6 @@ class CustomVJPTest(jtu.JaxTestCase):
         ValueError,
         r'output\[1\] the bwd rule produced an output of shape/dtype float..\[3\]'):
       jax.grad(lambda x, y: foo(x, y * y).sum(), 1)(jnp.ones(3), jnp.ones(4))
-
 
 def transpose_unary(f, x_example):
   def transposed(y):
