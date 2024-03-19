@@ -8,14 +8,25 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## jax 0.4.26
 
-* Deprecations
+* Deprecations & Removals
   * {func}`jax.tree_map` is deprecated; use `jax.tree.map` instead, or for backward
     compatibility with older JAX versions, use {func}`jax.tree_util.tree_map`.
+  * {func}`jax.clear_backends` is deprecated as it does not necessarily do what
+    its name suggests and can lead to unexpected consequences, e.g., it will not
+    destroy existing backends and release corresponding owned resources. Use
+    {func}`jax.clear_caches` if you only want to clean up compilation caches.
+    For backward compatibility or you really need to switch/reinitialize the
+    default backend, use {func}`jax.extend.backend.clear_backends`.
   * The `jax.experimental.maps` module and `jax.experimental.maps.xmap` are
     deprecated. Use `jax.experimental.shard_map` or `jax.vmap` with the
     `spmd_axis_name` argument for expressing SPMD device-parallel computations.
   * Passing arguments to {func}`jax.numpy.array_equal` and {func}`jax.numpy.array_equiv`
     that cannot be converted to a JAX array now results in an exception.
+  * The deprecated flag `jax_parallel_functions_output_gda` has been removed.
+    This flag was long deprecated and did nothing; its use was a no-op.
+  * The previously-deprecated imports `jax.interpreters.ad.config` and
+    `jax.interpreters.ad.source_info_util` have now been removed. Use `jax.config`
+    and `jax.extend.source_info_util` instead.
 
 ## jaxlib 0.4.26
 

@@ -213,6 +213,7 @@ def trace_context():
           softmax_custom_jvp.value,
           enable_memories.value,
           disable_jit.value,
+          enable_key_reuse_checks.value,
           jax_xla_profile_version.value,
           # Technically this affects jaxpr->stablehlo lowering, not tracing.
           hlo_source_file_canonicalization_regex.value)
@@ -986,11 +987,6 @@ log_checkpoint_residuals = define_bool_state(
     help=('Log a message every time jax.checkpoint (aka jax.remat) is '
           'partially evaluated (e.g. for autodiff), printing what residuals '
           'are saved.'))
-
-parallel_functions_output_gda = define_bool_state(
-    name='jax_parallel_functions_output_gda',
-    default=False,
-    help='If True, pjit will output GDAs.')
 
 pmap_shmap_merge = define_bool_state(
     name='jax_pmap_shmap_merge',
