@@ -508,6 +508,7 @@ def infer_argnums_and_argnames(
 
 def resolve_argnums(
     fun: Callable,
+    signature: inspect.Signature | None,
     donate_argnums: int | Sequence[int] | None,
     donate_argnames: str | Iterable[str] | None,
     static_argnums: int | Sequence[int] | None,
@@ -522,9 +523,7 @@ def resolve_argnums(
     (after static arguments have been removed), in the order that parameters
     are passed into the compiled function.
   """
-  try:
-    sig = inspect.signature(fun)
-  except ValueError as e:
+  if signature is None:
     # Some built-in functions don't support signature.
     # See: https://github.com/python/cpython/issues/73485
     # In this case no validation is done
@@ -536,7 +535,7 @@ def resolve_argnums(
         donate_argnums)
     if donate_argnames is not None:
       raise ValueError(f"Getting the signature of function {fun} failed. "
-                       "Pass donate_argnums instead of donate_argnames.") from e
+                       "Pass donate_argnums instead of donate_argnames.")
     assert donate_argnames is None
     donate_argnames = ()
   else:
@@ -544,15 +543,15 @@ def resolve_argnums(
     # If nums is None and names is not None, then nums are inferred from the
     # names and vice-versa.
     static_argnums, static_argnames = infer_argnums_and_argnames(
-        sig, static_argnums, static_argnames)
+        signature, static_argnums, static_argnames)
     donate_argnums, donate_argnames = infer_argnums_and_argnames(
-        sig, donate_argnums, donate_argnames)
+        signature, donate_argnums, donate_argnames)
 
     # Validation
-    _validate_argnums(sig, static_argnums, "static_argnums")
-    _validate_argnames(sig, static_argnames, "static_argnames")
-    _validate_argnums(sig, donate_argnums, "donate_argnums")
-    _validate_argnames(sig, donate_argnames, "donate_argnames")
+    _validate_argnums(signature, static_argnums, "static_argnums")
+    _validate_argnames(signature, static_argnames, "static_argnames")
+    _validate_argnums(signature, donate_argnums, "donate_argnums")
+    _validate_argnames(signature, donate_argnames, "donate_argnames")
 
   # Compensate for static argnums absorbing args
   _assert_no_intersection(static_argnames, donate_argnames)
@@ -594,10 +593,9 @@ def _shaped_abstractify_slow(x):
 
 # TODO(mattjj,yashkatariya): replace xla.abstractify with this, same behavior
 def shaped_abstractify(x):
-  try:
-    return _shaped_abstractify_handlers[type(x)](x)
-  except KeyError:
-    return _shaped_abstractify_slow(x)
+  handler = _shaped_abstractify_handlers.get(type(x), None)
+  return handler(x) if handler is not None else _shaped_abstractify_slow(x)
+
 _shaped_abstractify_handlers: dict[Any, Callable[[Any], core.ShapedArray]] = {}
 
 
@@ -619,6 +617,13 @@ def _np_scalar_abstractify(x: np.generic) -> ShapedArray:
       dtypes.canonicalize_dtype(dtype, allow_extended_dtype=True))
 _shaped_abstractify_handlers.update((t, _np_scalar_abstractify)
                                     for t in numpy_scalar_types)
+
+def _python_scalar_abstractify(x: int | float | complex | bool) -> ShapedArray:
+  typ = type(x)
+  dtype = dtypes._scalar_type_to_dtype(typ, x)
+  return ShapedArray((), dtype, weak_type=typ in dtypes._weak_types)
+_shaped_abstractify_handlers.update((t, _python_scalar_abstractify)
+                                    for t in dtypes.python_scalar_dtypes)
 
 # This decorator exists to make it easier to monkey-patch APIs in JAX.
 # By default it does nothing, but it can be monkey-patched to do other things.

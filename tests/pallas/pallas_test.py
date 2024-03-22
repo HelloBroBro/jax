@@ -31,6 +31,7 @@ from jax._src import linear_util as lu
 from jax._src import test_util as jtu
 from jax._src import state
 from jax._src.lax.control_flow.for_loop import for_loop
+from jax._src.lib import version as jaxlib_version
 from jax._src.pallas.pallas_call import _trace_to_jaxpr
 from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
@@ -1524,15 +1525,22 @@ class PallasCallInterpreterVmapTest(PallasCallVmapTest):
 class PallasOpsTest(PallasTest):
 
   ELEMENTWISE_OPS = [
-      ([jnp.abs, jnp.negative], ["int32", "int64", "float32", "float64"]),
+      (
+          [jnp.abs, jnp.negative],
+          ["int16", "int32", "int64", "float16", "float32", "float64"],
+      ),
+      ([jnp.ceil, jnp.floor], ["float32", "float64"]),
+      (
+          [jnp.exp, jnp.exp2, jnp.sin, jnp.cos, jnp.log, jnp.sqrt],
+          ["float16", "float32", "float64"],
+      ),
       (
           # fmt: off
-          [jnp.ceil, jnp.floor, jnp.exp, jnp.exp2, jnp.expm1, jnp.log1p,
-           jnp.sqrt, jnp.cbrt, lax.rsqrt, jnp.sin, jnp.cos, jnp.tan, jnp.asin,
-           jnp.acos, jnp.atan, jnp.sinh, jnp.cosh, jnp.tanh, jnp.asinh,
-           jnp.acosh, jnp.atanh],
+          [jnp.expm1, jnp.log1p, jnp.cbrt, lax.rsqrt, jnp.tan, jnp.asin,
+           jnp.acos, jnp.atan, jnp.sinh, jnp.cosh, jnp.asinh, jnp.acosh,
+           jnp.atanh],
           # fmt: on
-          ["float32", "float64"]
+          ["float32", "float64"],
       ),
       ([lax.population_count, lax.clz, jnp.invert], ["int32", "int64"]),
   ]
@@ -1543,6 +1551,9 @@ class PallasOpsTest(PallasTest):
       for fn, dtype in itertools.product(*args)
   )
   def test_elementwise(self, fn, dtype):
+    if fn is lax.exp2 and jaxlib_version < (0, 4, 26):
+      self.skipTest("Requires jaxlib 0.4.26 or later")
+
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), dtype), grid=1
     )
@@ -1552,7 +1563,7 @@ class PallasOpsTest(PallasTest):
     with contextlib.ExitStack() as stack:
       if jnp.dtype(dtype).itemsize == 8:
         stack.enter_context(config.enable_x64(True))
-      x = jnp.array([4.2, 2.4]).astype(dtype)
+      x = jnp.array([0.42, 2.4]).astype(dtype)
       np.testing.assert_allclose(kernel(x), fn(x), rtol=1e-6)
 
   @parameterized.parameters(
@@ -1611,7 +1622,7 @@ class PallasOpsTest(PallasTest):
   @parameterized.named_parameters(
       (f"{fn.__name__}_{dtype}", fn, dtype)
       for fn, dtype in itertools.product(
-          COMPARISON_OPS, ["int32", "uint32", "float32"]
+          COMPARISON_OPS, ["int32", "uint32", "float16", "float32"]
       )
   )
   def test_comparison(self, fn, dtype):
@@ -1674,17 +1685,15 @@ class PallasOpsTest(PallasTest):
   BINARY_OPS = [
       ([jnp.floor_divide], ["int32", "uint32"]),
       (
-          [jnp.add, jnp.subtract, jnp.multiply, jnp.remainder],
-          ["int32", "uint32", "float32"],
+          [jnp.add, jnp.subtract, jnp.multiply],
+          ["int16", "int32", "uint32", "float16", "float32"],
       ),
+      ([jnp.remainder], ["int32", "uint32", "float32"]),
       (
-          [
-              jnp.bitwise_and,
-              jnp.bitwise_or,
-              jnp.bitwise_xor,
-              jnp.bitwise_left_shift,
-              jnp.bitwise_right_shift,
-          ],
+          # fmt: off
+          [jnp.bitwise_and, jnp.bitwise_or, jnp.bitwise_xor,
+           jnp.bitwise_left_shift, jnp.bitwise_right_shift],
+          # fmt: on
           ["int32", "uint32"],
       ),
   ]
@@ -1704,6 +1713,22 @@ class PallasOpsTest(PallasTest):
     x = jnp.array([1, 3, -4, -6, 2, 5, 4, -7]).astype(dtype)
     y = jnp.array([3, 1, -4, -5, 2, -2, 2, 4]).astype(dtype)
     np.testing.assert_allclose(f(x, y), kernel(x, y))
+
+  @parameterized.parameters(
+      ((8, 4), jnp.int32, 0),
+      ((8, 16), jnp.float32, 1),
+      ((8, 16, 2), jnp.int8, 1),
+  )
+  def test_broadcasted_iota(self, shape, dtype, dimension):
+    f = lambda: jax.lax.broadcasted_iota(dtype, shape, dimension)
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct(shape, dtype), grid=1
+    )
+    def kernel(o_ref):
+      o_ref[...] = f()
+
+    np.testing.assert_allclose(f(), kernel())
 
 
 class PallasOpsInterpretTest(PallasOpsTest):

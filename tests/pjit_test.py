@@ -2836,6 +2836,20 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertEqual(compiled._executable._kept_var_idx, {5})
     self.assertLen(compiled._executable.in_avals, 1)
 
+  def test_pjit_relayout_multi_slice(self):
+    mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
+
+    @jax.jit
+    def mul(x):
+      return x @ x.T
+
+    x = jnp.arange(8).reshape(4, 2)
+    y = jax.device_put(x, jax.sharding.NamedSharding(mesh, P('x', 'y')))
+    compiled = mul.lower(jax.ShapeDtypeStruct(
+        y.shape, y.dtype, sharding=y.sharding)).compile()
+    out = compiled(y)
+    self.assertArraysEqual(out, x @ x.T)
+
   def test_pjit_with_device_arg(self):
     def mul(x):
       return x @ x.T
@@ -2926,6 +2940,16 @@ class ArrayPjitTest(jtu.JaxTestCase):
         'If backend or device is specified on jit, then '
         'out_shardings should not be specified.'):
       pjit(lambda x: x, out_shardings=s, device=jax.devices()[0])
+
+  def test_check_arg_error(self):
+    sds = jax.ShapeDtypeStruct((4, 2), np.int32)
+    inp = np.arange(8).reshape(4, 2)
+
+    with self.assertRaisesRegex(
+        TypeError,
+        r"Argument 'x\['b'\]\['c'\]' of shape int32\[4,2\] of "
+        "type.*ShapeDtypeStruct.*is not a valid JAX type."):
+      jax.jit(lambda x: x)({'a': inp, 'b': {'c': sds}})
 
   def test_pjit_device_backend_both_error(self):
     with self.assertRaisesRegex(

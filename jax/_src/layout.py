@@ -22,19 +22,12 @@ class Layout:
   pass
 
 
-class XLACompatibleLayout(Layout):
+class SpecifiedLayout(Layout):
+  layout: xc.PjRtLayout
 
-  def _to_xla_layout(self) -> str:
-    raise NotImplementedError("Subclasses should implement this method.")
-
-
-class SpecifiedLayout(XLACompatibleLayout):
-  layout: xc.Layout
-
-  def __init__(self, layout: xc.Layout):
+  def __init__(self, layout: xc.PjRtLayout):
     self._layout = layout
-    self._layout_str = self._layout.to_string()
-    self._minor_to_major = self._layout.minor_to_major()
+    self._layout_str = str(self._layout)
 
   def __repr__(self):
     return f'SpecifiedLayout({self._layout_str})'
@@ -51,9 +44,9 @@ class SpecifiedLayout(XLACompatibleLayout):
     return self._layout_str
 
 
-class LayoutRequest:
+class AutoLayout:
 
   def __repr__(self):
-    return "Request a layout from the compiler"
+    return "AUTO"
 
-AUTO = LayoutRequest()
+AUTO = AutoLayout()
