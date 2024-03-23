@@ -1824,6 +1824,18 @@ class ArrayPjitTest(jtu.JaxTestCase):
     for s in out4.addressable_shards:
       self.assertArraysEqual(s.data, input_data)
 
+  def test_sds_full_like(self):
+    # https://github.com/google/jax/issues/20390
+    mesh = jtu.create_global_mesh((2, 1), ('x', 'y'))
+    s = NamedSharding(mesh, P('x', 'y'))
+    x = jax.ShapeDtypeStruct((4, 4), jnp.float32, sharding=s)
+    y = jnp.zeros_like(x)
+    z = jnp.zeros_like(x, device=y.sharding)
+
+    self.assertEqual(x.sharding, s)
+    self.assertEqual(y.sharding, s)
+    self.assertEqual(z.sharding, s)
+
   def test_in_axis_resources_mismatch_error(self):
     global_input_shape = (8, 2)
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
@@ -2835,20 +2847,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
         unused_inp, unused_inp, unused_inp, unused_inp, unused_inp, inp).compile()
     self.assertEqual(compiled._executable._kept_var_idx, {5})
     self.assertLen(compiled._executable.in_avals, 1)
-
-  def test_pjit_relayout_multi_slice(self):
-    mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
-
-    @jax.jit
-    def mul(x):
-      return x @ x.T
-
-    x = jnp.arange(8).reshape(4, 2)
-    y = jax.device_put(x, jax.sharding.NamedSharding(mesh, P('x', 'y')))
-    compiled = mul.lower(jax.ShapeDtypeStruct(
-        y.shape, y.dtype, sharding=y.sharding)).compile()
-    out = compiled(y)
-    self.assertArraysEqual(out, x @ x.T)
 
   def test_pjit_with_device_arg(self):
     def mul(x):

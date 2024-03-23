@@ -77,7 +77,7 @@ zip, unsafe_zip = safe_zip, zip  # pylint: disable=redefined-builtin
 
 @dataclasses.dataclass
 class MeshContext:
-  logical_to_mesh: ir.Value
+  mesh_shape: tuple[int, ...]
   axis_names: tuple[str, ...]
   mesh_strides: tuple[int, ...]
 
@@ -298,20 +298,7 @@ class MosaicGridMapping:
     mesh_strides = pallas_utils.strides_from_shape(tuple(
         mesh.shape[a] for a in axis_names
     ))
-    logical_to_mesh = np.empty((mesh.size, len(axis_names)), dtype=np.int32)
-    for i, idx in enumerate(np.ndindex(*mesh.device_ids.shape)):
-      logical_to_mesh[i] = np.array(idx)
-    self.mesh_info = MeshInfo(logical_to_mesh, axis_names, mesh_strides)
-    l_to_m_aval = pl_core.AbstractMemoryRef(
-        jax_core.raise_to_shaped(jax_core.get_aval(logical_to_mesh)),
-        TPUMemorySpace.SMEM,
-    )
-    # We are now passing in the logical -> mesh index mapping
-    # TODO(sharadmv,apaszke): avoid stalling pipeline by marking the index
-    # mapping as scalar prefetch and instead just mark it as an SMEM operand.
-    self.scalar_prefetch_types = (
-        _get_arg_type(l_to_m_aval, None)[0],
-        *self.scalar_prefetch_types)
+    self.mesh_info = MeshInfo(mesh.device_ids.shape, axis_names, mesh_strides)
 
   def maybe_compress_grid(self):
     # If we have many leading parallel dimensions, we should "compress" them
@@ -324,9 +311,7 @@ class MosaicGridMapping:
     return bool(jax_core.used_axis_names_jaxpr(self.jaxpr))
 
   def get_extra_args(self) -> tuple[Any, ...]:
-    if self.mesh_info is None:
-      return ()
-    return (self.mesh_info.logical_to_mesh,)
+    return ()
 
   def get_dimension_semantics(self) -> ir.ArrayAttr:
 
@@ -344,7 +329,7 @@ class MosaicGridMapping:
 
 @dataclasses.dataclass
 class MeshInfo:
-  logical_to_mesh: np.ndarray
+  mesh_shape: tuple[int, ...]
   axis_names: list[str]
   mesh_strides: tuple[int, ...]
 
@@ -469,9 +454,9 @@ def lower_jaxpr_to_transform_func(
 
     mesh_info = mosaic_grid_mapping.mesh_info
     if mesh_info is not None:
-      (l_to_m,), scalar_prefetch = split_list(scalar_prefetch, [1])
-      mesh_context = MeshContext(l_to_m, mesh_info.axis_names,
-                                 mesh_info.mesh_strides)
+      mesh_context = MeshContext(
+          mesh_info.mesh_shape, mesh_info.axis_names, mesh_info.mesh_strides
+      )
     else:
       mesh_context = None
     lowering_context = LoweringContext(
@@ -527,9 +512,9 @@ def lower_jaxpr_to_func(
                           if i not in mosaic_grid_mapping.mapped_dims)
     mesh_info = mosaic_grid_mapping.mesh_info
     if mesh_info is not None:
-      (l_to_m,), scalar_prefetch = split_list(scalar_prefetch, [1])
-      mesh_context = MeshContext(l_to_m, mesh_info.axis_names,
-                                 mesh_info.mesh_strides)
+      mesh_context = MeshContext(
+          mesh_info.mesh_shape, mesh_info.axis_names, mesh_info.mesh_strides
+      )
     else:
       mesh_context = None
     lowering_context = LoweringContext(
@@ -748,7 +733,7 @@ def _maybe_cast_to_index(cast_to_index, x):
 
 def _index_to_start_size_stride(
     idx: tuple[indexing.Slice | int | ir.Value, ...], cast_to_index: bool
-) -> tuple[ir.Value, int, int, bool]:
+) -> tuple[ir.Value, int | ir.Value, int, bool]:
   assert not isinstance(idx, slice)
   if isinstance(idx, indexing.Slice):
     start = _maybe_cast_to_index(cast_to_index, idx.start)
@@ -777,7 +762,7 @@ def _indexer_to_start_size_stride(
     cast_to_index: bool,
 ) -> tuple[
     tuple[ir.Value, ...],
-    tuple[int, ...],
+    tuple[int | ir.Value, ...],
     tuple[int, ...],
     tuple[bool, ...],
     tuple[int | pl_core.Mapped, ...],
@@ -815,7 +800,7 @@ def _indexer_to_start_size_stride(
 def _slice_memref(ref: ir.Value, ref_aval: state.AbstractRef,
                   indexer: NDIndexer,
                   ref_block_shape: tuple[int | pl_core.Mapped, ...]
-                  ) -> tuple[ir.Value, state.AbstractRef, tuple[int | pl_core.Mapped, ...],
+                  ) -> tuple[ir.Value, tuple[int | pl_core.Mapped, ...],
                              tuple[int | pl_core.Mapped, ...]]:
   assert ref_block_shape is not None
   target_shape = indexer.get_indexer_shape()
@@ -828,26 +813,28 @@ def _slice_memref(ref: ir.Value, ref_aval: state.AbstractRef,
   )
   if not all((s is None or s == 1) for s in strides):
     raise NotImplementedError("Strided slices of references are unsupported.")
+  dynamic_sizes = tuple(s for s in sizes if isinstance(s, ir.Value))
+  ir_dynamic_size = ir.ShapedType.get_dynamic_size()
+  static_sizes = tuple(s if not isinstance(s, ir.Value)
+                       else ir_dynamic_size for s in sizes)
   target_ref_ty = ir.MemRefType.get(
-      tuple(sizes), _dtype_to_ir_type(ref_aval.dtype),
+      static_sizes, _dtype_to_ir_type(ref_aval.dtype),
       memory_space=ref.type.memory_space)
-  inner_aval = ref_aval.inner_aval
-  out_aval = ref_aval.update(inner_aval=inner_aval.update(shape=target_shape))
-  out = tpu.MemRefSliceOp(target_ref_ty, ref, starts, []).result
+  out = tpu.MemRefSliceOp(target_ref_ty, ref, starts, dynamic_sizes).result
   if any(squeeze_dims):
     # We need to squeeze out some dimensions
     squeezed_ref_ty = ir.MemRefType.get(
         tuple(target_shape), _dtype_to_ir_type(ref_aval.dtype),
         memory_space=ref.type.memory_space)
     out = tpu.MemRefSqueezeOp(squeezed_ref_ty, out).result
-  return out, out_aval, ref_block_shape
+  return out, ref_block_shape
 
 
 def _index_ref(ref, ref_aval, ref_block_shape, indexers):
   for indexer in indexers:
-    ref, ref_aval, ref_block_shape = _slice_memref(ref, ref_aval, indexer,
-                                                   ref_block_shape)
-  return ref, ref_aval, ref_block_shape
+    ref, ref_block_shape = _slice_memref(ref, ref_aval, indexer,
+                                         ref_block_shape)
+  return ref, ref_block_shape
 
 
 def _load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree, **_):
@@ -861,7 +848,7 @@ def _load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree, **_):
     raise NotImplementedError
 
   ref_block_shape, *_ = ctx.block_shapes
-  ref, _, ref_block_shape = _index_ref(
+  ref, ref_block_shape = _index_ref(
       ref, ref_aval, ref_block_shape, slice_indexers)
   ref_type = ir.MemRefType(ref.type)
   is_smem_load = str(ref_type.memory_space) == "#tpu.memory_space<smem>"
@@ -915,7 +902,7 @@ def _masked_swap_lowering_rule(
     raise NotImplementedError
 
   ref_block_shape, *_ = ctx.block_shapes
-  ref, _, ref_block_shape = _index_ref(
+  ref, ref_block_shape = _index_ref(
       ref, ref_aval, ref_block_shape, slice_indexers)
 
   ref_type = ir.MemRefType(ref.type)
@@ -2074,7 +2061,7 @@ def _semaphore_signal_lowering_rule(
 ):
   sem_aval, _, _, _ = tree_util.tree_unflatten(args_tree, ctx.avals_in)
   sem, indexers, value, device_id = tree_util.tree_unflatten(args_tree, args)
-  sem, _, _ = _index_ref(sem, sem_aval, sem_aval.shape, indexers)
+  sem, _ = _index_ref(sem, sem_aval, sem_aval.shape, indexers)
   if device_id is not None:
     device_id = _device_id_to_logical(ctx, device_id, device_id_type)
   return tpu.SemaphoreSignalOp(sem, value, device_id=device_id).results
@@ -2087,7 +2074,7 @@ lowering_rules[tpu_primitives.semaphore_signal_p] = (
 def _semaphore_wait_lowering_rule(ctx: LoweringRuleContext, *args, args_tree):
   sem_aval, _, _ = tree_util.tree_unflatten(args_tree, ctx.avals_in)
   sem, indexers, value = tree_util.tree_unflatten(args_tree, args)
-  sem, _, _ = _index_ref(sem, sem_aval, sem_aval.shape, indexers)
+  sem, _ = _index_ref(sem, sem_aval, sem_aval.shape, indexers)
   return tpu.SemaphoreWaitOp(sem, value).results
 lowering_rules[tpu_primitives.semaphore_wait_p] = _semaphore_wait_lowering_rule
 
@@ -2109,16 +2096,16 @@ def _dma_start_lowering_rule(ctx: LoweringRuleContext, *args, tree,
   )
   block_shapes = tree_util.tree_unflatten(tree, ctx.block_shapes)
   src_ref_block_shape, dst_ref_block_shape = block_shapes[0], block_shapes[2]
-  src_ref, _, _ = _index_ref(
+  src_ref, _ = _index_ref(
       src_ref, src_ref_aval, src_ref_block_shape, src_indexers
   )
   if src_sem is not None:
-    src_sem, _, _ = _index_ref(
+    src_sem, _ = _index_ref(
         src_sem, src_sem_aval, src_sem_aval.shape, src_sem_indexers)
-  dst_ref, _, _ = _index_ref(
+  dst_ref, _ = _index_ref(
       dst_ref, dst_ref_aval, dst_ref_block_shape, dst_indexers
   )
-  sem, _, _ = _index_ref(sem, sem_aval, sem_aval.shape, sem_indexers)
+  sem, _ = _index_ref(sem, sem_aval, sem_aval.shape, sem_indexers)
   if device_id is not None:
     device_id = _device_id_to_logical(ctx, device_id, device_id_type)
   return tpu.EnqueueDMAOp(src_ref, dst_ref, sem, source_semaphore=src_sem,
@@ -2133,10 +2120,10 @@ def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
   sem_aval, _, ref_aval, _ = tree_util.tree_unflatten(tree, ctx.avals_in)
   block_shapes = tree_util.tree_unflatten(tree, ctx.block_shapes)
   ref_block_shape = block_shapes[2]
-  ref, _, _ = _index_ref(
+  ref, _ = _index_ref(
       ref, ref_aval, ref_block_shape, indexers
   )
-  sem, _, _ = _index_ref(sem, sem_aval, sem_aval.shape, sem_indexers)
+  sem, _ = _index_ref(sem, sem_aval, sem_aval.shape, sem_indexers)
   return tpu.WaitDMAOp(sem, ref).results
 lowering_rules[tpu_primitives.dma_wait_p] = _dma_wait_lowering_rule
 
@@ -2145,11 +2132,15 @@ def _device_id_lowering_rule(ctx: LoweringRuleContext):
 lowering_rules[tpu_primitives.device_id_p] = _device_id_lowering_rule
 
 def _axis_index_rule(ctx: LoweringRuleContext, *, axis_name: str):
-  device_id = _make_index(tpu.DeviceIdOp().result)
-  l_to_m = ctx.lowering_context.mesh_context.logical_to_mesh
+  device_id = tpu.DeviceIdOp().result
+  mesh_shape = ctx.lowering_context.mesh_context.mesh_shape
   axis_names = ctx.lowering_context.mesh_context.axis_names
-  col = _make_index(axis_names.index(axis_name))
-  return memref.LoadOp(l_to_m, [device_id, col]).result
+  axis_index = axis_names.index(axis_name)
+  axis_size = ir_constant(mesh_shape[axis_index])
+  minor_divisor = ir_constant(
+      np.prod(mesh_shape[axis_index + 1 :], dtype=np.int32)
+  )
+  return arith.remsi(arith.divsi(device_id, minor_divisor), axis_size)
 lowering_rules[lax.axis_index_p] = _axis_index_rule
 
 def _get_barrier_semaphore_rule(ctx: LoweringRuleContext):
