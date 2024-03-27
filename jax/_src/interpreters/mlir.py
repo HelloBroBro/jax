@@ -1426,7 +1426,10 @@ def lower_jaxpr_to_fun(
         args.append([hlo.create_token()])
       else:
         args.append(arg)
-    callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
+    if name is not None:
+      callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
+    else:
+      callee_name_stack = name_stack
     consts = [ir_constants(xla.canonicalize_dtype(x)) for x in jaxpr.consts]
     out_vals, tokens_out = jaxpr_subcomp(
         ctx, jaxpr.jaxpr, callee_name_stack, tokens_in,
@@ -1883,7 +1886,7 @@ def core_call_lowering(ctx: LoweringRuleContext,
 
 register_lowering(core.call_p, partial(core_call_lowering, name="core_call"))
 register_lowering(core.closed_call_p,
-                  partial(core_call_lowering, name="core_closed_call"))
+                  partial(core_call_lowering, name=None))
 
 def broadcast_in_dim(ctx: LoweringRuleContext, op, aval_out: core.AbstractValue, *,
                      broadcast_dimensions) -> ir.Value:
@@ -2461,15 +2464,22 @@ def emit_python_callback(
       raise RuntimeError(
           "Mismatched number of outputs from callback. "
           "Expected: {}, Actual: {}".format(len(result_avals), len(out_vals)))
+    # Handle Python literals, and custom arrays, e.g., tf.Tensor.
+    out_vals = tuple(np.asarray(a) for a in out_vals)
     for i, (out_val, out_aval) in enumerate(zip(out_vals, result_avals)):
       if out_val.shape != out_aval.shape:
         raise RuntimeError(
-            f"Incorrect output shape for return value {i}: "
-            "Expected: {}, Actual: {}".format(out_aval.shape, out_val.shape))
+            f"Incorrect output shape for return value #{i}: "
+            f"Expected: {out_aval.shape}, Actual: {out_val.shape}")
+      if out_val.dtype != dtypes.canonicalize_dtype(out_val.dtype):
+        raise RuntimeError(
+            "Cannot return 64-bit values when `jax_enable_x64` is disabled. "
+            f"Actual: {out_val.dtype}")
       if out_val.dtype != out_aval.dtype:
         raise RuntimeError(
-            f"Incorrect output dtype for return value {i}: "
-            "Expected: {}, Actual: {}".format(out_aval.dtype, out_val.dtype))
+            f"Incorrect output dtype for return value #{i}: "
+            f"Expected: {out_aval.dtype}, Actual: {out_val.dtype}")
+
     if platform == "tpu":
       # On TPU we cannot receive empty arrays. So, we return from the wrapped
       # callback only the non-empty results, and we will create empty constants
