@@ -1426,10 +1426,7 @@ def lower_jaxpr_to_fun(
         args.append([hlo.create_token()])
       else:
         args.append(arg)
-    if name is not None:
-      callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
-    else:
-      callee_name_stack = name_stack
+    callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
     consts = [ir_constants(xla.canonicalize_dtype(x)) for x in jaxpr.consts]
     out_vals, tokens_out = jaxpr_subcomp(
         ctx, jaxpr.jaxpr, callee_name_stack, tokens_in,
@@ -1455,6 +1452,14 @@ def lower_jaxpr_to_fun(
       flat_outputs = [
           o if s is None else wrap_with_sharding_op(entry_lowering_ctx, o, o_aval, s)
           for o, s, o_aval in zip(flat_outputs, ir_result_shardings, output_avals)]
+
+    # Insert a custom call if output is on host because XLA needs that to do the
+    # transfer.
+    if ir_result_memory_kinds is not None:
+      # TODO: We should have a default memory kind which we can check against.
+      flat_outputs = [
+          o if mk is None or mk == 'device' else wrap_with_memory_kind(o, mk, o_aval)
+          for o, mk, o_aval in zip(flat_outputs, ir_result_memory_kinds, output_avals)]
 
     if ir_result_shardings is not None and name == "main":
       flat_outputs = [
@@ -1886,7 +1891,7 @@ def core_call_lowering(ctx: LoweringRuleContext,
 
 register_lowering(core.call_p, partial(core_call_lowering, name="core_call"))
 register_lowering(core.closed_call_p,
-                  partial(core_call_lowering, name=None))
+                  partial(core_call_lowering, name="core_closed_call"))
 
 def broadcast_in_dim(ctx: LoweringRuleContext, op, aval_out: core.AbstractValue, *,
                      broadcast_dimensions) -> ir.Value:
