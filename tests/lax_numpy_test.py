@@ -5097,8 +5097,11 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         start, stop, num, endpoint=endpoint,
         dtype=dtype if dtype != jnp.bfloat16 else np.float32,
         axis=axis).astype(dtype)
-    self._CheckAgainstNumpy(np_op, jnp_op, args_maker,
-                            check_dtypes=False, tol=tol)
+
+    # JAX follows NumPy 2.0 semantics for complex geomspace.
+    if not (jtu.numpy_version() < (2, 0, 0) and dtypes.issubdtype(dtype, jnp.complexfloating)):
+      self._CheckAgainstNumpy(np_op, jnp_op, args_maker,
+                              check_dtypes=False, tol=tol)
     if dtype in (inexact_dtypes + [None,]):
       self._CompileAndCheck(jnp_op, args_maker,
                             check_dtypes=False, atol=tol, rtol=tol)
@@ -5176,6 +5179,13 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     jnp_op = lambda x: jnp.broadcast_to(x, to_shape)
     self._CheckAgainstNumpy(np_op, jnp_op, args_maker)
     self._CompileAndCheck(jnp_op, args_maker)
+
+  def testBroadcastToInvalidShape(self):
+    # Regression test for https://github.com/google/jax/issues/20533
+    x = jnp.zeros((3, 4, 5))
+    with self.assertRaisesRegex(
+        ValueError, "Cannot broadcast to shape with fewer dimensions"):
+      jnp.broadcast_to(x, (4, 5))
 
   @jtu.sample_product(
     [dict(shapes=shapes, broadcasted_shape=broadcasted_shape)
