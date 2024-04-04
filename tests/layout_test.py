@@ -20,9 +20,9 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P, SingleDeviceSharding
 from jax._src import config
-from jax._src import layout
+from jax._src.layout import Layout, DeviceLocalLayout as DLL
 from jax._src import test_util as jtu
 from jax._src.util import safe_zip
 from jax._src import xla_bridge
@@ -89,7 +89,7 @@ class LayoutTest(jtu.JaxTestCase):
     sds2 = jax.ShapeDtypeStruct(np_inp2.shape, np_inp2.dtype, sharding=s2)
 
     lowered_apply = jax.jit(apply).lower(
-        sds1, sds2, _in_layouts=layout.AUTO, _out_layouts=layout.AUTO)
+        sds1, sds2, _in_layouts=Layout(DLL.AUTO), _out_layouts=Layout(DLL.AUTO))
     compiled_apply = lowered_apply.compile()
 
     arg_layouts, kw_layouts = compiled_apply._input_layouts()
@@ -115,7 +115,7 @@ class LayoutTest(jtu.JaxTestCase):
     self.assertEqual(init_count[0], 1)
 
     self.assertEqual(init_out[0].layout, init_compiled._output_layouts()[0])
-    self.assertEqual(init_out[1].layout, init_compiled._output_layouts()[0])
+    self.assertEqual(init_out[1].layout, init_compiled._output_layouts()[1])
 
     with jtu.count_aot_jit_cpp_cache_miss() as apply_count:
       apply_out = compiled_apply(*init_out)
@@ -158,8 +158,8 @@ class LayoutTest(jtu.JaxTestCase):
     self.assertArraysEqual(out, np_inp.T)
     self.assertEqual(out.sharding, NamedSharding(mesh, P(None, 'y', 'x')))
 
-    compiled_auto = jax.jit(f).lower(sds, _in_layouts=layout.AUTO,
-                                     _out_layouts=layout.AUTO).compile()
+    compiled_auto = jax.jit(f).lower(sds, _in_layouts=Layout(DLL.AUTO),
+                                     _out_layouts=Layout(DLL.AUTO)).compile()
     self.assertTupleEqual(
         extract_minor_to_major(compiled_auto._input_layouts()[0][0]), (2, 1, 0))
     self.assertTupleEqual(
@@ -176,7 +176,7 @@ class LayoutTest(jtu.JaxTestCase):
       return x.T
 
     compiled = jax.jit(f).lower(
-        arr, _in_layouts=None, _out_layouts=layout.AUTO).compile()
+        arr, _in_layouts=Layout(), _out_layouts=Layout(DLL.AUTO)).compile()
     self.assertTupleEqual(
         extract_minor_to_major(compiled._input_layouts()[0][0]), (1, 0))
     self.assertTupleEqual(
@@ -194,7 +194,8 @@ class LayoutTest(jtu.JaxTestCase):
     s = NamedSharding(mesh, P('x', 'y'))
 
     compiled = jax.jit(lambda x: x.T, in_shardings=s, out_shardings=s).lower(
-        np_inp, _in_layouts=layout.AUTO, _out_layouts=layout.AUTO).compile()
+        np_inp, _in_layouts=Layout(DLL.AUTO),
+        _out_layouts=Layout(DLL.AUTO)).compile()
     out = compiled(np_inp)
     self.assertTupleEqual(
         extract_minor_to_major(compiled._input_layouts()[0][0]), (1, 0))
@@ -209,8 +210,8 @@ class LayoutTest(jtu.JaxTestCase):
 
     shape = (8, 2)
     inps = [np.arange(math.prod(shape)).reshape(shape)] * 6
-    compiled = jax.jit(f).lower(*inps, _in_layouts=layout.AUTO,
-                                _out_layouts=layout.AUTO).compile()
+    compiled = jax.jit(f).lower(*inps, _in_layouts=Layout(DLL.AUTO),
+                                _out_layouts=Layout(DLL.AUTO)).compile()
     arg_layouts, _ = compiled._input_layouts()
     out1, out2 = compiled(*inps)
 
@@ -223,8 +224,10 @@ class LayoutTest(jtu.JaxTestCase):
     self.assertArraysEqual(out1, out3)
     self.assertArraysEqual(out2, out4)
 
-    # TODO(yashkatariya, frostig): Also use the arg_layouts to create an Array
-    # and then pass that back into compiled.
+    arrs = [jax.device_put(i, l) for i, l in zip(inps, arg_layouts)]
+    out5, out6 = jax.jit(f)(*arrs)
+    self.assertArraysEqual(out1, out5)
+    self.assertArraysEqual(out2, out6)
 
   def test_aot_layout_mismatch(self):
     mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
@@ -241,10 +244,11 @@ class LayoutTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError,
         'Layout passed to jit does not match the layout on the respective arg'):
-      jax.jit(f).lower(arr, _in_layouts=layout.AUTO)
+      jax.jit(f).lower(arr, _in_layouts=Layout(DLL.AUTO))
 
     compiled = jax.jit(f).lower(
-        sds, _in_layouts=layout.AUTO, _out_layouts=layout.AUTO).compile()
+        sds, _in_layouts=Layout(DLL.AUTO),
+        _out_layouts=Layout(DLL.AUTO)).compile()
 
     with self.assertRaisesRegex(
         ValueError,
@@ -258,6 +262,49 @@ class LayoutTest(jtu.JaxTestCase):
 
     jax.jit(jnp.dot, backend=jax.default_backend()).lower(
         out_cpu, out_cpu).compile()  # doesn't crash
+
+  def test_device_put_concrete_layout(self):
+    mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
+    shape = (8, 128)
+    np_inp = np.arange(math.prod(shape)).reshape(shape)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr = jax.device_put(np_inp, s)
+
+    compiled = jax.jit(
+        lambda x: x * 2).lower(arr, _out_layouts=Layout(DLL.AUTO)).compile()
+    col = compiled._output_layouts()
+
+    out = jax.device_put(np_inp, col)
+    self.assertEqual(out.layout, col)
+    self.assertArraysEqual(out, np_inp)
+    for s in out.addressable_shards:
+      self.assertEqual(out.layout.device_local_layout,
+                       s.data.layout.device_local_layout)
+
+  def test_device_put_non_concrete_layout_error(self):
+    np_inp = np.arange(16).reshape(8, 2)
+
+    l1 = Layout(DLL.AUTO, SingleDeviceSharding(jax.devices()[0]))
+    with self.assertRaisesRegex(
+        ValueError, 'sharding and device_local_layout.*should be concrete'):
+      jax.device_put(np_inp, l1)
+
+    l2 = Layout(DLL.AUTO)
+    with self.assertRaisesRegex(
+        ValueError, 'sharding and device_local_layout.*should be concrete'):
+      jax.device_put(np_inp, l2)
+
+    l3 = Layout(None, SingleDeviceSharding(jax.devices()[0]))
+    out = jax.device_put(np_inp, l3)
+    self.assertArraysEqual(out, np_inp)
+    self.assertTrue(out._committed)
+
+  def invalid_layout_spec(self):
+    x = np.arange(8)
+    compiled = jax.jit(lambda x: x).lower(x).compile()
+    with self.assertRaisesRegex(
+        ValueError, 'Sharding has to be concrete when layout.*'):
+      Layout(compiled._output_layouts()[0], None)
 
 
 if __name__ == '__main__':

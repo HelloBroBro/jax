@@ -93,14 +93,18 @@ def paged_flash_attention_kernel(
     pages_per_sequence: int,
     mask_value: float,
     megacore_mode: str,
+    program_ids=(),
 ):
   """Pallas kernel for paged attention."""
-  core_index, b, h, i = (
-      pl.program_id(0),
-      pl.program_id(1),
-      pl.program_id(2),
-      pl.program_id(3),
-  )
+  if program_ids:
+    core_index, b, h, i = program_ids
+  else:
+    core_index, b, h, i = (
+        pl.program_id(0),
+        pl.program_id(1),
+        pl.program_id(2),
+        pl.program_id(3),
+    )
   num_kv_heads, _, page_size, _ = k_pages_hbm_ref.shape
   bk = page_size * pages_per_compute_block
   num_cores = pl.num_programs(0)
@@ -114,25 +118,35 @@ def paged_flash_attention_kernel(
   b = b * b_step + b_start
   length = lengths_ref[b]
 
-  def advance_to_next_non_zero_length(b):
-    return lax.fori_loop(
-        lax.div(b, b_step),
-        lax.div(batch_size, b_step),
-        lambda _, b: jnp.where(lengths_ref[b] == 0, b + b_step, b),
-        b,
-    )
-
   def compute_block_indices(b, h, i):
-    length = lengths_ref[b]
-    not_done = i * bk < length
-    i_next = jnp.where(not_done, i, 0)
-    h_next = jnp.where(not_done, h, h + h_step)
-    is_last_head = h_next >= num_kv_heads
-    h_next = jnp.where(is_last_head, h_start, h_next)
-    b_next = jnp.where(
-        is_last_head, advance_to_next_non_zero_length(b + b_step), b
-    )
-    return b_next, h_next, i_next
+
+    def advance_b():
+      next_b = b + b_step
+
+      def advance_to_next_non_zero_length():
+        next_next_b = next_b + b_step
+        return lax.fori_loop(
+            lax.div(next_next_b, b_step),
+            lax.div(batch_size, b_step),
+            lambda _, b: jnp.where(lengths_ref[b] == 0, b + b_step, b),
+            next_next_b,
+        )
+
+      return (
+          lax.cond(
+              jnp.logical_and(next_b < batch_size, lengths_ref[next_b] == 0),
+              advance_to_next_non_zero_length,
+              lambda: next_b,
+          ),
+          h_start,
+          0,
+      )
+
+    def advance_h():
+      next_h = h + h_step
+      return lax.cond(next_h < num_kv_heads, lambda: (b, next_h, 0), advance_b)
+
+    return lax.cond(i * bk < lengths_ref[b], lambda: (b, h, i), advance_h)
 
   def create_kv_async_copy_descriptors(b, h, i, buffer_index):
     page_offset = b * pages_per_sequence + i * pages_per_compute_block
@@ -219,12 +233,64 @@ def paged_flash_attention_kernel(
     step_ref[0] = step + 1
 
 
+def paged_flash_attention_kernel_inline_seq_dim(
+    lengths_ref,
+    page_indices_ref,
+    buffer_index_ref,
+    step_ref,
+    q_ref,
+    k_pages_hbm_ref,
+    v_pages_hbm_ref,
+    o_ref,
+    m_ref,
+    l_ref,
+    k_vmem_buffer,
+    v_vmem_buffer,
+    sem,
+    *,
+    batch_size: int,
+    pages_per_compute_block: int,
+    pages_per_sequence: int,
+    mask_value: float,
+    megacore_mode: str,
+):
+  core_index, b, h = pl.program_id(0), pl.program_id(1), pl.program_id(2)
+
+  def body(i, _):
+    paged_flash_attention_kernel(
+        lengths_ref,
+        page_indices_ref,
+        buffer_index_ref,
+        step_ref,
+        q_ref,
+        k_pages_hbm_ref,
+        v_pages_hbm_ref,
+        o_ref,
+        m_ref,
+        l_ref,
+        k_vmem_buffer,
+        v_vmem_buffer,
+        sem,
+        batch_size=batch_size,
+        pages_per_compute_block=pages_per_compute_block,
+        pages_per_sequence=pages_per_sequence,
+        mask_value=mask_value,
+        megacore_mode=megacore_mode,
+        program_ids=(core_index, b, h, i),
+    )
+    return ()
+
+  bk = pages_per_compute_block * k_pages_hbm_ref.shape[-2]
+  lax.fori_loop(0, lax.div(lengths_ref[b] + bk - 1, bk), body, ())
+
+
 @functools.partial(
     jax.jit,
     static_argnames=[
         "pages_per_compute_block",
         "mask_value",
         "megacore_mode",
+        "inline_seq_dim",
     ],
 )
 def paged_attention(
@@ -237,6 +303,7 @@ def paged_attention(
     mask_value: float = DEFAULT_MASK_VALUE,
     pages_per_compute_block: int,
     megacore_mode: Optional[str] = None,
+    inline_seq_dim: bool = True,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
   """Paged grouped query attention.
 
@@ -261,6 +328,8 @@ def paged_attention(
         divisible by 2.
       * batch: megacore parallelism on batch dimension; requires batch divisible
         by 2.
+    inline_seq_dim: whether to fuse kernel instances along the sequence dim into
+      one kernel.
 
   Returns:
     The output of attention([batch_size, num_heads, head_dim]).
@@ -352,9 +421,31 @@ def paged_attention(
       )
     q_dtype_for_kernel_launch = q.dtype
 
+  if inline_seq_dim:
+    kernel = paged_flash_attention_kernel_inline_seq_dim
+    grid = (
+        num_cores,
+        batch_size // num_cores if megacore_mode == "batch" else batch_size,
+        num_kv_heads // num_cores
+        if megacore_mode == "kv_head"
+        else num_kv_heads,
+    )  # type: ignore
+    dimension_sematics = ("parallel", "arbitrary", "arbitrary")  # type: ignore
+  else:
+    kernel = paged_flash_attention_kernel
+    grid = (
+        num_cores,
+        batch_size // num_cores if megacore_mode == "batch" else batch_size,
+        num_kv_heads // num_cores
+        if megacore_mode == "kv_head"
+        else num_kv_heads,
+        pages_per_sequence // pages_per_compute_block,
+    )  # type: ignore
+    dimension_sematics = ("parallel", "arbitrary", "arbitrary", "arbitrary")  # type: ignore
+
   out, _, _ = pl.pallas_call(
       functools.partial(
-          paged_flash_attention_kernel,
+          kernel,
           pages_per_sequence=pages_per_sequence,
           batch_size=batch_size,
           pages_per_compute_block=pages_per_compute_block,
@@ -373,16 +464,7 @@ def paged_attention(
               q_block_spec,
               q_block_spec,
           ],
-          grid=(
-              num_cores,
-              batch_size // num_cores
-              if megacore_mode == "batch"
-              else batch_size,
-              num_kv_heads // num_cores
-              if megacore_mode == "kv_head"
-              else num_kv_heads,
-              pages_per_sequence // pages_per_compute_block,
-          ),
+          grid=grid,
           scratch_shapes=(
               pltpu.VMEM(
                   (
@@ -406,12 +488,7 @@ def paged_attention(
           ),
       ),
       mosaic_params=dict(
-          dimension_semantics=(
-              "parallel",
-              "arbitrary",
-              "arbitrary",
-              "arbitrary",
-          )
+          dimension_semantics=dimension_sematics,
       ),
       out_shape=[
           jax.ShapeDtypeStruct(q.shape, q_dtype_for_kernel_launch),
