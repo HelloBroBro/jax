@@ -378,8 +378,8 @@ def _parse_jit_arguments(fun: Callable, in_shardings: Any, out_shardings: Any,
     # rather than raising an error. https://github.com/google/jax/issues/2367
     in_shardings = tuple(in_shardings)
 
-  in_shardings, _, _ = prepare_axis_resources(in_shardings, 'in_shardings')
-  out_shardings, _, _ = prepare_axis_resources(out_shardings, 'out_shardings')
+  in_shardings = prepare_axis_resources(in_shardings, 'in_shardings')
+  out_shardings = prepare_axis_resources(out_shardings, 'out_shardings')
 
   user_specified_in_shardings = (in_shardings is not None and
                                  not is_unspecified(in_shardings))
@@ -1279,11 +1279,14 @@ def _resolve_in_layouts(args, jit_in_layouts, jit_in_shardings):
       else:
         resolved_in_layouts.append(None)
     else:
-      if committed and arg_layout != jit_in_l:
+      # arg_layout can be None because some backends don't implement the
+      # required layout methods. Hence `arr.layout` can return
+      # `Layout(None, sharding)`
+      if committed and arg_layout is not None and arg_layout != jit_in_l:
         raise ValueError('Layout passed to jit does not match the layout '
                           'on the respective arg. '
                           f'Got pjit layout: {jit_in_l},\n'
-                          f'arg sharding: {arg_layout} for '
+                          f'arg layout: {arg_layout} for '
                           f'arg shape: {shaped_abstractify(arg).str_short()}')
       resolved_in_layouts.append(jit_in_l)
   return tuple(resolved_in_layouts)
@@ -2163,7 +2166,7 @@ def with_sharding_constraint(x, shardings):
   .. _Distributed arrays and automatic parallelization: https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html
   """
   x_flat, tree = tree_flatten(x)
-  user_shardings, _, _ = prepare_axis_resources(
+  user_shardings = prepare_axis_resources(
       shardings, "shardings", allow_unconstrained_dims=True)
   del shardings
 

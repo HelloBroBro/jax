@@ -1817,6 +1817,13 @@ def _move_mutable_consts(
                      effects, None)
   return core.ClosedJaxpr(jaxpr, consts), in_mut
 
+@weakref_lru_cache
+def _discharge_internal_refs(jaxpr: core.ClosedJaxpr) -> core.ClosedJaxpr:
+  from jax._src.state.discharge import discharge_state
+  jaxpr_, consts = discharge_state(jaxpr.jaxpr, jaxpr.consts)
+  jaxpr_._debug_info = jaxpr.jaxpr.debug_info
+  return core.ClosedJaxpr(jaxpr_, consts)
+
 
 class SemanticallyEqualShardings:
 
@@ -2074,6 +2081,8 @@ def lower_sharding_computation(
     global_out_avals = closed_jaxpr.out_avals
   else:
     inout_aliases = mut = None
+    if any(isinstance(e, core.InternalMutableArray) for e in closed_jaxpr.effects):
+      closed_jaxpr = _discharge_internal_refs(closed_jaxpr)
 
   jaxpr = closed_jaxpr.jaxpr
   assert len(out_shardings) == len(out_layouts) == len(global_out_avals), (
@@ -2749,21 +2758,16 @@ def _maybe_get_and_check_in_shardings(
         xla_s = aval.dtype._rules.logical_sharding(aval, xla_s)
       new_in_shardings.append(xla_s)
     else:
-      # TODO(yashkatariya): Remove the if branch for abstract_token once
-      # choosing input shardings by XLA is enabled again.
-      if aval is core.abstract_token:
-        new_in_shardings.append(orig)
-      else:
-        xla_hlo_s = xla_s._to_xla_hlo_sharding(aval.ndim)  # type: ignore
-        orig_hlo_s = orig._to_xla_hlo_sharding(aval.ndim)  # type: ignore
-        # MANUAL HloSharding comes from other partitioning frameworks.
-        if (not dtypes.issubdtype(aval.dtype, dtypes.extended) and
-            not xla_hlo_s.is_manual() and
-            (not op_shardings.are_op_shardings_equal(xla_hlo_s, orig_hlo_s))):
-          raise AssertionError(
-              f"Unexpected XLA sharding override: (XLA) {xla_s} != {orig} "
-              "(User sharding)")
-        new_in_shardings.append(orig)
+      xla_hlo_s = xla_s._to_xla_hlo_sharding(aval.ndim)  # type: ignore
+      orig_hlo_s = orig._to_xla_hlo_sharding(aval.ndim)  # type: ignore
+      # MANUAL HloSharding comes from other partitioning frameworks.
+      if (not dtypes.issubdtype(aval.dtype, dtypes.extended) and
+          not xla_hlo_s.is_manual() and
+          (not op_shardings.are_op_shardings_equal(xla_hlo_s, orig_hlo_s))):
+        raise AssertionError(
+            f"Unexpected XLA sharding override: (XLA) {xla_s} != {orig} "
+            "(User sharding)")
+      new_in_shardings.append(orig)
   return new_in_shardings
 
 
@@ -3286,7 +3290,7 @@ def check_array_xla_sharding_layout_match(
 
 
 def get_array_mapping(pspec: PartitionSpec) -> ArrayMappingOrAutoOrUnspecified:
-  parsed_pspec, _, _ = sharding_impls.prepare_axis_resources(
+  parsed_pspec = sharding_impls.prepare_axis_resources(
       pspec, "pspec to array_mapping")
   return _get_array_mapping(parsed_pspec)
 
