@@ -56,8 +56,9 @@ Index = tuple[slice, ...]
 PRNGKeyArray = Any  # TODO(jakevdp): fix cycles and import this.
 
 def _get_device(a: ArrayImpl) -> Device:
-  assert len(a.devices()) == 1
-  return next(iter(a.devices()))
+  devices = a.sharding._internal_device_list  # type: ignore
+  assert len(devices) == 1
+  return devices[0]
 
 
 class Shard:
@@ -137,7 +138,7 @@ def _create_copy_plan(arrays, s: Sharding, shape: Shape):
   di_map = _cached_index_calc(s, shape)
   copy_plan = []
   for a in arrays:
-    ind = di_map.get(_get_device(a), None)
+    ind = di_map.get(a.sharding._internal_device_list[0], None)  # type:ignore
     if ind is not None:
       copy_plan.append((ind, a))
   return copy_plan
@@ -885,15 +886,11 @@ def _hashable_index(idx):
   return tree_util.tree_map(
       lambda x: (x.start, x.stop) if type(x) == slice else x, idx)
 
-# The fast path is handled directly in shard_args().
+
 def shard_sharded_device_array_slow_path(x, devices, indices, sharding):
   candidates = defaultdict(list)
-  if isinstance(x, ArrayImpl):
-    bufs = [buf.data for buf in x.addressable_shards]
-    arr_indices = tuple(x.sharding.devices_indices_map(x.shape).values())
-  else:
-    bufs = x.device_buffers
-    arr_indices = x.indices
+  bufs = [buf.data for buf in x.addressable_shards]
+  arr_indices = tuple(x.sharding.devices_indices_map(x.shape).values())
   for buf, idx in safe_zip(bufs, arr_indices):
     candidates[_hashable_index(idx)].append(buf)
 
