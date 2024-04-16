@@ -8,6 +8,10 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## jax 0.4.27
 
+* New Functionality
+  * Added {func}`jax.numpy.unstack`, following the addition of this function in
+    the array API 2023 standard, soon to be adopted by NumPy.
+
 * Changes
   * {func}`jax.pure_callback` and {func}`jax.experimental.io_callback`
     now use {class}`jax.Array` instead of {class}`np.ndarray`. You can recover
@@ -15,6 +19,10 @@ Remember to align the itemized text with the first line of an item within a list
     `jax.tree.map(np.asarray, args)` before passing them to the callback.
   * `complex_arr.astype(bool)` now follows the same semantics as NumPy, returning
     False where `complex_arr` is equal to `0 + 0j`, and True otherwise.
+  * Async dispatch expensive computations on the CPU backend. This only applies
+    to non-parallel computations, as we already do async dispatch for parallel
+    computations. You can recover the old behavior by setting
+    `jax.config.update('jax_cpu_enable_async_dispatch', False)`.
 
 * Deprecations & Removals
   * Pallas now exclusively uses XLA for compiling kernels on GPU. The old
@@ -29,7 +37,10 @@ Remember to align the itemized text with the first line of an item within a list
     is deprecated; empty inputs to softmax are now supported without setting this.
   * In {func}`jax.jit`, passing invalid `static_argnums` or `static_argnames`
     now leads to an error rather than a warning.
-
+  * The minimum jaxlib version is now 0.4.23.
+  * The {func}`jax.numpy.hypot` function now issues a deprecation warning when
+    passing complex-valued inputs to it. This will raise an error when the
+    deprecation is completed.
 
 ## jaxlib 0.4.27
 
@@ -156,7 +167,7 @@ Remember to align the itemized text with the first line of an item within a list
       cannot interact, e.g., in arithmetic operations.
       Scopes are introduced by {func}`jax.experimental.jax2tf.convert`,
       {func}`jax.experimental.export.symbolic_shape`, {func}`jax.experimental.export.symbolic_args_specs`.
-      The scope of a symbolic expression `e` can be read with `e.scope` and passed 
+      The scope of a symbolic expression `e` can be read with `e.scope` and passed
       into the above functions to direct them to construct symbolic expressions in
       a given scope.
       See https://github.com/google/jax/blob/main/jax/experimental/jax2tf/README.md#user-specified-symbolic-constraints.

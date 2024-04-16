@@ -26,7 +26,6 @@ from jax._src.layout import Layout, DeviceLocalLayout as DLL
 from jax._src import test_util as jtu
 from jax._src.util import safe_zip
 from jax._src import xla_bridge
-from jax._src.lib import xla_extension_version
 
 config.parse_flags_with_absl()
 
@@ -66,8 +65,6 @@ class LayoutTest(jtu.JaxTestCase):
   def setUp(self):
     if not jtu.test_device_matches(['tpu']):
       self.skipTest("Layouts do not work on CPU and GPU backends yet.")
-    if xla_extension_version < 215:
-      self.skipTest('All tests require xla_extension_version >= 215')
     super().setUp()
 
   def test_auto_layout(self):
@@ -327,6 +324,50 @@ class LayoutTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError, 'Sharding has to be concrete when layout.*'):
       Layout(compiled.output_layouts()[0], None)
+
+  def test_layout_on_sds(self):
+    mesh = jtu.create_global_mesh((2, 1), ('x', 'y'))
+    s = NamedSharding(mesh, P('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    arr = jax.device_put(np_inp, s)
+
+    out_layout = jax.jit(jnp.sin, out_shardings=Layout(DLL.AUTO)).lower(
+        arr).compile().output_layouts()
+
+    sds = jax.ShapeDtypeStruct(arr.shape, arr.dtype, sharding=out_layout)
+    arg_layout, _ = jax.jit(lambda x: x * 2).lower(sds).compile().input_layouts()
+    self.assertEqual(arg_layout[0], out_layout)
+
+    with self.assertRaisesRegex(
+        TypeError,
+        'DeviceLocalLayout.AUTO` cannot be used in place of a device-local'
+        ' layout in a `ShapeDtypeStruct`'):
+      jax.ShapeDtypeStruct(arr.shape, arr.dtype, sharding=Layout(DLL.AUTO))
+
+  def test_make_array_from_callback(self):
+    mesh = jtu.create_global_mesh((2, 1), ('x', 'y'))
+    s = NamedSharding(mesh, P('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    sds = jax.ShapeDtypeStruct(np_inp.shape, np_inp.dtype, sharding=s)
+
+    layout = jax.jit(lambda x: x * 2).lower(sds).compile().output_layouts()
+
+    out = jax.make_array_from_callback(np_inp.shape, layout,
+                                       lambda idx: np_inp[idx])
+    self.assertArraysEqual(out, np_inp)
+    self.assertEqual(out.layout, layout)
+
+    with self.assertRaisesRegex(
+        TypeError,
+        '`DeviceLocalLayout.AUTO` cannot be used in place of a device-local'
+        ' layout'):
+      jax.make_array_from_callback(np_inp.shape, Layout(DLL.AUTO, s),
+                                   lambda idx: np_inp[idx])
+
+    with self.assertRaisesRegex(
+        TypeError, 'sharding should be an instance of `jax.sharding`'):
+      jax.make_array_from_callback(
+          np_inp.shape, Layout(None, None), lambda idx: np_inp[idx])
 
 
 if __name__ == '__main__':

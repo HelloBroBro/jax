@@ -1865,6 +1865,35 @@ def _raise_warnings_or_errors_for_jit_of_pmap(
         "extra data movement anyway, so maybe you don't want it after all).")
 
 
+@lru_cache(maxsize=2048)
+def _maybe_get_default_layout(arg_layout, jit_in_layout, sharding, aval
+                              ) -> DeviceLocalLayout | None:
+  if is_unspecified_or_auto(sharding):
+    return None
+  # TODO(yashkatariya): Figure out how layouts work with extended dtypes.
+  if dtypes.issubdtype(aval.dtype, dtypes.extended):
+    return None
+  if not core.is_constant_shape(aval.shape):
+    return None
+  shard_shape = sharding.shard_shape(aval.shape)
+  d = sharding._device_assignment[0]
+  # If a backend doesn't implement `get_default_layout` return `None` to avoid
+  # cache misses. This can happen when you have `jit(f, in_shardings=s)`. On
+  # first call you pass it a sharded array with layout and on second call you
+  # pass a numpy array. The layouts should be the same to get cache hits.
+  try:
+    al = DeviceLocalLayout(
+        d.client.get_default_layout(aval.dtype, shard_shape, d))
+  except:
+    return None
+  # argument does not have `.layout` property. ShapedArray, numpy array, etc
+  # are some examples.
+  if arg_layout is None:
+    return al if jit_in_layout is None else arg_layout  # arg_layout is None
+  # If arg has a `.layout` property, then return device_local_layout as is.
+  return arg_layout.device_local_layout
+
+
 @weakref_lru_cache
 def _cached_lowering_to_hlo(closed_jaxpr, api_name, fun_name, backend,
                             semantic_in_shardings, semantic_out_shardings,
@@ -2918,12 +2947,8 @@ class UnloadedMeshExecutable:
         in_shardings, out_shardings, committed, da = _get_metadata_jit_pmap(
             xla_executable.local_devices(), len(in_shardings), len(out_shardings))
 
-    if xla_extension_version >= 217:
-      in_layouts, out_layouts = _get_layouts_from_executable(
-          xla_executable, in_layouts, out_layouts, len(ordered_effects))
-    else:
-      assert all(i is None for i in in_layouts)
-      assert all(o is None for o in out_layouts)
+    in_layouts, out_layouts = _get_layouts_from_executable(
+        xla_executable, in_layouts, out_layouts, len(ordered_effects))
 
     out_shardings = maybe_recover_user_shardings(
         in_shardings, out_shardings, global_in_avals, global_out_avals)

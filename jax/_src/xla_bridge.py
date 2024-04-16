@@ -106,6 +106,13 @@ _CPU_ENABLE_GLOO_COLLECTIVES = config.DEFINE_bool(
     help="If True, enable cross-process collectives on CPU using Gloo.",
 )
 
+_CPU_ENABLE_ASYNC_DISPATCH = config.DEFINE_bool(
+    name="jax_cpu_enable_async_dispatch",
+    default=True,
+    help="Only applies to non-parallel computations. If False, run computations"
+    "inline without async dispatch.",
+)
+
 
 # Warn the user if they call fork(), because it's not going to go well for them.
 def _at_fork():
@@ -114,10 +121,7 @@ def _at_fork():
     "and JAX is multithreaded, so this will likely lead to a deadlock.",
     RuntimeWarning, stacklevel=2)
 
-# os.register_at_fork only exists on Unix.
-if hasattr(os, "register_at_fork"):
-  os.register_at_fork(before=_at_fork)
-
+_at_fork_handler_installed = False
 
 # Backends
 
@@ -129,10 +133,6 @@ def _get_tpu_library_path() -> str | None:
 
   libtpu_module = maybe_import_libtpu()
   if libtpu_module is not None:
-    if xla_extension_version < 212:
-      # xla_extension_version < 212 uses tpu_tracer which requires calling
-      # configure_library_path.
-      libtpu_module.configure_library_path()
     return libtpu_module.get_library_path()
 
   return None
@@ -226,28 +226,25 @@ def register_backend_factory(name: str, factory: BackendFactory, *,
 
 
 def make_cpu_client() -> xla_client.Client:
-  if xla_extension_version >= 223:
-    collectives: xla_client._xla.CpuCollectives | None = None
-    if _CPU_ENABLE_GLOO_COLLECTIVES.value:
-      collectives = xla_client._xla.make_gloo_tcp_collectives(  # type: ignore
-        distributed_client=distributed.global_state.client,
-      )
+  collectives: xla_client._xla.CpuCollectives | None = None
+  if _CPU_ENABLE_GLOO_COLLECTIVES.value:
+    collectives = xla_client._xla.make_gloo_tcp_collectives(  # type: ignore
+      distributed_client=distributed.global_state.client,
+    )
+  if xla_extension_version >= 257:
     return xla_client.make_cpu_client(  # type: ignore
+      asynchronous=_CPU_ENABLE_ASYNC_DISPATCH.value,
       distributed_client=distributed.global_state.client,
       node_id=distributed.global_state.process_id,
       num_nodes=distributed.global_state.num_processes,
       collectives=collectives,
     )
-  elif xla_extension_version >= 216:
-    # TODO(phawkins): remove type: ignore after updating jaxlib version used for
-    # mypy checks.
-    return xla_client.make_cpu_client(  # type: ignore
-      distributed_client=distributed.global_state.client,
-      node_id=distributed.global_state.process_id,
-      num_nodes=distributed.global_state.num_processes,
-    )
-  else:
-    return xla_client.make_cpu_client()
+  return xla_client.make_cpu_client(  # type: ignore
+    distributed_client=distributed.global_state.client,
+    node_id=distributed.global_state.process_id,
+    num_nodes=distributed.global_state.num_processes,
+    collectives=collectives,
+  )
 
 
 register_backend_factory(
@@ -824,12 +821,19 @@ def backends() -> dict[str, xla_client.Client]:
   global _backends
   global _backend_errors
   global _default_backend
+  global _at_fork_handler_installed
 
   _discover_and_register_pjrt_plugins()
 
   with _backend_lock:
     if _backends:
       return _backends
+
+    # os.register_at_fork only exists on Unix.
+    if not _at_fork_handler_installed and hasattr(os, "register_at_fork"):
+      os.register_at_fork(before=_at_fork)
+      _at_fork_handler_installed = True
+
     if jax_platforms := config.jax_platforms.value:
       platforms = []
       # Allow platform aliases in the list of platforms.

@@ -173,6 +173,27 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
               for a in out]
     return f
 
+
+  @jtu.sample_product(
+    [dict(shape=shape, axis=axis)
+      for shape in all_shapes
+      for axis in list(range(-len(shape), len(shape)))],
+    dtype=all_dtypes,
+  )
+  def testUnstack(self, shape, axis, dtype):
+    rng = jtu.rand_default(self.rng())
+    x = rng(shape, dtype)
+    if jnp.asarray(x).ndim == 0:
+      with self.assertRaisesRegex(ValueError, "Unstack requires arrays with"):
+        jnp.unstack(x, axis=axis)
+      return
+    y = jnp.unstack(x, axis=axis)
+    if shape[axis] == 0:
+      self.assertEqual(y, ())
+    else:
+      self.assertArraysEqual(jnp.moveaxis(jnp.array(y), 0, axis), x)
+
+
   @parameterized.parameters(
     [dtype for dtype in [jnp.bool, jnp.uint8, jnp.uint16, jnp.uint32,
                          jnp.uint64, jnp.int8, jnp.int16, jnp.int32, jnp.int64,
@@ -912,6 +933,26 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
       with self.assertWarns(DeprecationWarning, msg=msg):
         jnp.clip(x, max=jnp.array([-1+5j]))
+
+
+  # TODO(micky774): Check for ValueError instead of DeprecationWarning when
+  # jnp.hypot deprecation is completed (began 2024-4-2) and default behavior is
+  # Array API 2023 compliant
+  @jtu.sample_product(shape=all_shapes)
+  @jax.numpy_rank_promotion('allow')  # This test explicitly exercises implicit rank promotion.
+  @jax.numpy_dtype_promotion('standard')  # This test explicitly exercises mixed type promotion
+  def testHypotComplexInputDeprecation(self, shape):
+    rng = jtu.rand_default(self.rng())
+    x = rng(shape, dtype=jnp.complex64)
+    msg = "Passing complex-valued inputs to hypot"
+    # jit is disabled so we don't miss warnings due to caching.
+    with jax.disable_jit():
+      with self.assertWarns(DeprecationWarning, msg=msg):
+        jnp.hypot(x, x)
+
+      with self.assertWarns(DeprecationWarning, msg=msg):
+        y = jnp.ones_like(x)
+        jnp.hypot(x, y)
 
 
   @jtu.sample_product(

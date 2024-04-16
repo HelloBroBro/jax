@@ -13,11 +13,11 @@
 # limitations under the License.
 
 import jax
+from jax._src.dtypes import issubdtype
 from jax.experimental.array_api._data_type_functions import (
     result_type as _result_type,
     isdtype as _isdtype,
 )
-import numpy as np
 
 
 def _promote_dtypes(name, *args):
@@ -148,6 +148,11 @@ def conj(x, /):
   return jax.numpy.conj(x)
 
 
+def copysign(x1, x2, /):
+  """Composes a floating-point value with the magnitude of x1_i and the sign of x2_i for each element of the input array x1."""
+  return jax.numpy.copysign(x1, x2)
+
+
 def cos(x, /):
   """Calculates an implementation-dependent approximation to the cosine for each element x_i of the input array x."""
   x, = _promote_dtypes("cos", x)
@@ -208,6 +213,20 @@ def greater_equal(x1, x2, /):
   """Computes the truth value of x1_i >= x2_i for each element x1_i of the input array x1 with the respective element x2_i of the input array x2."""
   x1, x2 = _promote_dtypes("greater_equal", x1, x2)
   return jax.numpy.greater_equal(x1, x2)
+
+
+def hypot(x1, x2, /):
+  """Computes the square root of the sum of squares for each element x1_i of the input array x1 with the respective element x2_i of the input array x2."""
+  x1, x2 = _promote_dtypes("hypot", x1, x2)
+
+  # TODO(micky774): Remove when jnp.hypot deprecation is completed
+  # (began 2024-4-14) and default behavior is Array API 2023 compliant
+  if issubdtype(x1.dtype, jax.numpy.complexfloating):
+    raise ValueError(
+      "hypot does not support complex-valued inputs. Please convert to real "
+      "values first, such as by using jnp.real or jnp.imag to take the real "
+      "or imaginary components respectively.")
+  return jax.numpy.hypot(x1, x2)
 
 
 def imag(x, /):
@@ -300,6 +319,18 @@ def logical_xor(x1, x2, /):
   return jax.numpy.logical_xor(x1, x2)
 
 
+def maximum(x1, x2, /):
+  """Computes the maximum value for each element x1_i of the input array x1 relative to the respective element x2_i of the input array x2."""
+  x1, x2 = _promote_dtypes("maximum", x1, x2)
+  return jax.numpy.maximum(x1, x2)
+
+
+def minimum(x1, x2, /):
+  """Computes the minimum value for each element x1_i of the input array x1 relative to the respective element x2_i of the input array x2."""
+  x1, x2 = _promote_dtypes("minimum", x1, x2)
+  return jax.numpy.minimum(x1, x2)
+
+
 def multiply(x1, x2, /):
   """Calculates the product for each element x1_i of the input array x1 with the respective element x2_i of the input array x2."""
   x1, x2 = _promote_dtypes("multiply", x1, x2)
@@ -354,6 +385,11 @@ def sign(x, /):
   if _isdtype(x.dtype, "complex floating"):
     return x / abs(x)
   return jax.numpy.sign(x)
+
+
+def signbit(x, /):
+  """Determines whether the sign bit is set for each element x_i of the input array x."""
+  return jax.numpy.signbit(x)
 
 
 def sin(x, /):
