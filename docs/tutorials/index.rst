@@ -26,7 +26,7 @@ JAX 101
    debugging
    random-numbers
    working-with-pytrees
-   single-host-sharding
+   sharded-computation
    stateful-computations
    simple-neural-network
 
@@ -54,12 +54,3 @@ JAX 301
    jax-primitives
    jaxpr
    advanced-compilation
-
-
-Reference
----------
-
-.. toctree::
-   :maxdepth: 1
-
-   installation
