@@ -556,8 +556,7 @@ def _infer_params(jit_info, args, kwargs):
   flat_fun, explicit_args = hoist_obj_attrs(flat_fun, explicit_args)
 
   if (donate_argnums or donate_argnames) and not config.debug_nans.value:
-    donated_invars = donation_vector(
-        donate_argnums, donate_argnames, dyn_args, dyn_kwargs)
+    donated_invars = donation_vector(donate_argnums, donate_argnames, in_tree)
   else:
     donated_invars = (False,) * len(explicit_args)
   del donate_argnums, donate_argnames
