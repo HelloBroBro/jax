@@ -414,6 +414,9 @@ def export(fun_jax: Callable,
 
       symbolic_scope: tuple[_shape_poly.SymbolicScope, tree_util.KeyPath] | None = None
       for k_path, aval in tree_util.tree_flatten_with_path((args_specs, kwargs_specs))[0]:
+        # Static args may has no `shape` attribute.
+        if not hasattr(aval, "shape"):
+          continue
         for d in aval.shape:
           if _shape_poly.is_symbolic_dim(d):
             if symbolic_scope is None:
@@ -790,7 +793,7 @@ def _check_lowering(lowering) -> None:
 # Their backwards compatibility is tested by back_compat_test.py.
 _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     "Sharding", "SPMDFullToShardShape", "SPMDShardToFullShape",
-    "ducc_fft", "dynamic_ducc_fft", "cu_threefry2x32",
+    "dynamic_ducc_fft", "cu_threefry2x32",
     # cholesky on CPU
     "lapack_spotrf", "lapack_dpotrf", "lapack_cpotrf", "lapack_zpotrf",
     # eigh on CPU
@@ -809,7 +812,7 @@ _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     "lapack_sgesdd", "lapack_dgesdd", "lapack_cgesdd", "lapack_zgesdd",
     # qr on GPU
     "cusolver_geqrf", "cublas_geqrf_batched",
-    "cusolver_geqrf", "cusolver_orgqr",
+    "cusolver_orgqr",
     # qr and svd on TPU
     "Qr", "ProductOfElementaryHouseholderReflectors",
     # triangular_solve on CPU
