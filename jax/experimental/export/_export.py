@@ -793,7 +793,7 @@ def _check_lowering(lowering) -> None:
 # Their backwards compatibility is tested by back_compat_test.py.
 _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     "Sharding", "SPMDFullToShardShape", "SPMDShardToFullShape",
-    "dynamic_ducc_fft", "cu_threefry2x32",
+    "dynamic_ducc_fft",
     # cholesky on CPU
     "lapack_spotrf", "lapack_dpotrf", "lapack_cpotrf", "lapack_zpotrf",
     # eigh on CPU
@@ -1179,7 +1179,8 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
   # TODO: maybe cache multiple calls
   fn = mlir.merge_mlir_modules(ctx.module_context.module,
                                f"call_exported_{exported.fun_name}",
-                               submodule)
+                               submodule,
+                               dst_symtab=ctx.module_context.symbol_table)
 
   submodule_args = []
   # All the platforms for the current lowering must be among the platforms

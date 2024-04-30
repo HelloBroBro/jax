@@ -5897,6 +5897,7 @@ class NumpySignaturesTest(jtu.JaxTestCase):
       'partition': ['kind', 'order'],
       'percentile': ['weights'],
       'quantile': ['weights'],
+      'reshape': ['shape', 'copy'],
       'row_stack': ['casting'],
       'stack': ['casting'],
       'std': ['correction', 'mean'],
@@ -6017,8 +6018,18 @@ class NumpyDocTests(jtu.JaxTestCase):
     # Test that docstring wrapping & transformation didn't fail.
 
     # Functions that have their own docstrings & don't wrap numpy.
-    known_exceptions = {'fromfile', 'fromiter', 'frompyfunc', 'vectorize'}
-
+    known_exceptions = {
+      'argwhere',
+      'flatnonzero',
+      'fromfile',
+      'fromiter',
+      'frompyfunc',
+      'matrix_transpose',
+      'nonzero',
+      'transpose',
+      'vectorize',
+      'where',
+    }
     for name in dir(jnp):
       if name in known_exceptions or name.startswith('_'):
         continue
