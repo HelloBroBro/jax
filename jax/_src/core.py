@@ -198,16 +198,19 @@ class Jaxpr:
   def _repr_pretty_(self, p, cycle):
     return p.text(self.pretty_print(use_color=True))
 
-  def replace(self, *, constvars=None, invars=None, outvars=None, eqns=None,
-              effects=None, debug_info=None):
-    constvars = self.constvars if constvars is None else constvars
-    invars =  self.invars if invars is None else invars
-    outvars = self.outvars if outvars is None else outvars
-    eqns = self.eqns if eqns is None else eqns
-    effects = self.effects if effects is None else effects
-    debug_info = self.debug_info if debug_info is None else debug_info
-    return Jaxpr(constvars=constvars, invars=invars, outvars=outvars, eqns=eqns,
-                 effects=effects, debug_info=debug_info)
+  def replace(self, **kwargs):
+    jaxpr = Jaxpr(
+        constvars=kwargs.pop("constvars", self.constvars),
+        invars=kwargs.pop("invars", self.invars),
+        outvars=kwargs.pop("outvars", self.outvars),
+        eqns=kwargs.pop("eqns", self.eqns),
+        effects=kwargs.pop("effects", self.effects),
+        debug_info=kwargs.pop("debug_info", self.debug_info),
+    )
+    if kwargs:
+      raise ValueError(f"Unknown keyword arguments: {kwargs}")
+    return jaxpr
+
 
 def join_effects(*effects: Effects) -> Effects:
   return set().union(*effects) if effects else no_effects
@@ -423,7 +426,8 @@ class Primitive:
     return self.bind_with_trace(find_top_trace(args), args, params)
 
   def bind_with_trace(self, trace, args, params):
-    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+    with pop_level(trace.level):
+      out = trace.process_primitive(self, map(trace.full_raise, args), params)
     return map(full_lower, out) if self.multiple_results else full_lower(out)
 
   def def_impl(self, impl):
@@ -1244,6 +1248,17 @@ def new_base_main(trace_type: type[Trace],
     if t() is not None:
       leaked_tracers = maybe_find_leaked_tracers(t())
       if leaked_tracers: raise leaked_tracer_error("trace", t(), leaked_tracers)
+
+@contextmanager
+def pop_level(level: int):
+  level = max(level, 1)  # don't pop the base
+  prev, thread_local_state.trace_state.trace_stack.stack = \
+      thread_local_state.trace_state.trace_stack.stack, \
+      thread_local_state.trace_state.trace_stack.stack[:level]
+  try:
+    yield
+  finally:
+    thread_local_state.trace_state.trace_stack.stack = prev
 
 @contextmanager
 def ensure_compile_time_eval():
