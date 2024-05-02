@@ -93,6 +93,7 @@ jax.scipy.signal
    correlate
    correlate2d
    csd
+   detrend
    istft
    stft
    welch
@@ -395,6 +396,7 @@ jax.scipy.stats.poisson
 
    logpmf
    pmf
+   cdf
 
 jax.scipy.stats.t
 ~~~~~~~~~~~~~~~~~
