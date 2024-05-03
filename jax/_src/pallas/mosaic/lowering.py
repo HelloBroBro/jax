@@ -1134,7 +1134,9 @@ def _dot_general_lowering_rule(
   else:
     raise NotImplementedError(ctx.avals_out[0].dtype)
   if any(len(a.shape) != 2 for a in ctx.avals_in):
-    raise NotImplementedError(ctx.avals_in)
+    raise NotImplementedError(
+        f"Only 2D tensors supported in dot; received: {ctx.avals_in}"
+    )
   lhs_aval, _ = ctx.avals_in
   # This is really a matrix-vector product. It only looks like matrix-matrix.
   if lhs_dims == (1,) and rhs_dims == (1,) and ctx.avals_in[1].shape[0] == 1:
@@ -2230,12 +2232,14 @@ def _semaphore_signal_lowering_rule(
     args_tree,
     device_id_type: tpu_primitives.DeviceIdType,
 ):
-  sem_aval, _, _, _ = tree_util.tree_unflatten(args_tree, ctx.avals_in)
-  sem, indexers, value, device_id = tree_util.tree_unflatten(args_tree, args)
+  sem_aval, _, _, _, _ = tree_util.tree_unflatten(args_tree, ctx.avals_in)
+  sem, indexers, value, device_id, core_index = tree_util.tree_unflatten(args_tree, args)
   sem, _ = _index_ref(sem, sem_aval, sem_aval.shape, indexers)
   if device_id is not None:
     device_id = _device_id_to_logical(ctx, device_id, device_id_type)
-  return tpu.SemaphoreSignalOp(sem, value, device_id=device_id).results
+  return tpu.SemaphoreSignalOp(
+      sem, value, device_id=device_id, core_id=core_index
+  ).results
 
 
 lowering_rules[tpu_primitives.semaphore_signal_p] = (
