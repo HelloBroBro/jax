@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import partial
+import itertools
 import math
 import warnings
 
@@ -28,6 +29,7 @@ from jax import jit, custom_jvp
 from jax import lax
 
 from jax._src.lax import lax as lax_internal
+from jax._src.lax.lax import PrecisionLike
 from jax._src.lax import linalg as lax_linalg
 from jax._src.numpy import lax_numpy as jnp
 from jax._src.numpy import reductions, ufuncs
@@ -1611,18 +1613,19 @@ def vector_norm(x: ArrayLike, /, *, axis: int | None = None, keepdims: bool = Fa
 
 
 def vecdot(x1: ArrayLike, x2: ArrayLike, /, *, axis: int = -1) -> Array:
-  """Compute the (batched) vector dot product of two arrays.
+  """Compute the (batched) vector conjugate dot product of two arrays.
 
   JAX implementation of :func:`numpy.linalg.vecdot`.
 
   Args:
     x1: left-hand side array.
-    x2: right-hand side array. Size of ``x2[axis]`` must match size of ``x1[axis]``.
+    x2: right-hand side array. Size of ``x2[axis]`` must match size of ``x1[axis]``,
+      and remaining dimensions must be broadcast-compatible.
     axis: axis along which to compute the dot product (default: -1)
 
   Returns:
-    array containing the dot product of ``x1`` and ``x2`` along ``axis``. The
-    non-contracted dimensions are broadcast together.
+    array containing the conjugate dot product of ``x1`` and ``x2`` along ``axis``.
+    The non-contracted dimensions are broadcast together.
 
   See also:
     - :func:`jax.numpy.vecdot`: similar API in the ``jax.numpy`` namespace.
@@ -1636,7 +1639,6 @@ def vecdot(x1: ArrayLike, x2: ArrayLike, /, *, axis: int = -1) -> Array:
     >>> x2 = jnp.array([4, 5, 6])
     >>> jnp.linalg.vecdot(x1, x2)
     Array(32, dtype=int32)
-
 
     Batched vector dot product of two 2D arrays:
 
@@ -1657,7 +1659,7 @@ def matmul(x1: ArrayLike, x2: ArrayLike, /) -> Array:
 
   Args:
     x1: first input array, of shape ``(..., N)``.
-    x2: second input array. Must have shape ``(N,)`` or ``(..., M, N)``.
+    x2: second input array. Must have shape ``(N,)`` or ``(..., N, M)``.
       In the multi-dimensional case, leading dimensions must be broadcast-compatible
       with the leading dimensions of ``x1``.
 
@@ -1718,14 +1720,14 @@ def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
     array containing the tensor dot product of the inputs
 
   See also:
-    :func:`jax.numpy.tensordot`: equivalent API in the :mod:`jax.numpy` namespace.
-    :func:`jax.numpy.einsum`: NumPy API for more general tensor contractions.
-    :func:`jax.lax.dot_general`: XLA API for more general tensor contractions.
+    - :func:`jax.numpy.tensordot`: equivalent API in the :mod:`jax.numpy` namespace.
+    - :func:`jax.numpy.einsum`: NumPy API for more general tensor contractions.
+    - :func:`jax.lax.dot_general`: XLA API for more general tensor contractions.
 
   Examples:
     >>> x1 = jnp.arange(24.).reshape(2, 3, 4)
     >>> x2 = jnp.ones((3, 4, 5))
-    >>> jnp.tensordot(x1, x2)
+    >>> jnp.linalg.tensordot(x1, x2)
     Array([[ 66.,  66.,  66.,  66.,  66.],
            [210., 210., 210., 210., 210.]], dtype=float32)
 
@@ -1756,7 +1758,7 @@ def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
            [19, 26, 33]], dtype=int32)
 
     Setting ``axes=0`` for one-dimensional inputs is equivalent to
-    ``jnp.linalg.outer``:
+    :func:`jax.numpy.linalg.outer`:
 
     >>> x1 = jnp.array([1, 2])
     >>> x2 = jnp.array([1, 2, 3])
@@ -1924,3 +1926,95 @@ def tensorsolve(a: ArrayLike, b: ArrayLike, axes: tuple[int, ...] | None = None)
                      f" got a.shape={a_arr.shape}, b.ndim={b_arr.ndim}.")
   a_arr = a_arr.reshape(b_arr.size, math.prod(out_shape))
   return solve(a_arr, b_arr.ravel()).reshape(out_shape)
+
+
+def multi_dot(arrays: Sequence[ArrayLike], *, precision: PrecisionLike = None) -> Array:
+  """Efficiently compute matrix products between a sequence of arrays.
+
+  JAX implementation of :func:`numpy.linalg.multi_dot`.
+
+  JAX internally uses the opt_einsum library to compute the most efficient
+  operation order.
+
+  Args:
+    arrays: sequence of arrays. All must be two-dimensional, except the first
+      and last which may be one-dimensional.
+    precision: either ``None`` (default), which means the default precision for
+      the backend, a :class:`~jax.lax.Precision` enum value (``Precision.DEFAULT``,
+      ``Precision.HIGH`` or ``Precision.HIGHEST``).
+
+  Returns:
+    an array representing the equivalent of ``reduce(jnp.matmul, arrays)``, but
+    evaluated in the optimal order.
+
+  This function exists because the cost of computing sequences of matmul operations
+  can differ vastly depending on the order in which the operations are evaluated.
+  For a single matmul, the number of floating point operations (flops) required to
+  compute a matrix product can be approximated this way:
+
+  >>> def approx_flops(x, y):
+  ...   # for 2D x and y, with x.shape[1] == y.shape[0]
+  ...   return 2 * x.shape[0] * x.shape[1] * y.shape[1]
+
+  Suppose we have three matrices that we'd like to multiply in sequence:
+
+  >>> key1, key2, key3 = jax.random.split(jax.random.key(0), 3)
+  >>> x = jax.random.normal(key1, shape=(200, 5))
+  >>> y = jax.random.normal(key2, shape=(5, 100))
+  >>> z = jax.random.normal(key3, shape=(100, 10))
+
+  Because of associativity of matrix products, there are two orders in which we might
+  evaluate the product ``x @ y @ z``, and both produce equivalent outputs up to floating
+  point precision:
+
+  >>> result1 = (x @ y) @ z
+  >>> result2 = x @ (y @ z)
+  >>> jnp.allclose(result1, result2, atol=1E-4)
+  Array(True, dtype=bool)
+
+  But the computational cost of these differ greatly:
+
+  >>> print("(x @ y) @ z flops:", approx_flops(x, y) + approx_flops(x @ y, z))
+  (x @ y) @ z flops: 600000
+  >>> print("x @ (y @ z) flops:", approx_flops(y, z) + approx_flops(x, y @ z))
+  x @ (y @ z) flops: 30000
+
+  The second approach is about 20x more efficient in terms of estimated flops!
+
+  ``multi_dot`` is a function that will automatically choose the fastest
+  computational path for such problems:
+
+  >>> result3 = jnp.linalg.multi_dot([x, y, z])
+  >>> jnp.allclose(result1, result3, atol=1E-4)
+  Array(True, dtype=bool)
+
+  We can use JAX's :ref:`ahead-of-time-lowering` tools to estimate the total flops
+  of each approach, and confirm that ``multi_dot`` is choosing the more efficient
+  option:
+
+  >>> jax.jit(lambda x, y, z: (x @ y) @ z).lower(x, y, z).cost_analysis()['flops']
+  600000.0
+  >>> jax.jit(lambda x, y, z: x @ (y @ z)).lower(x, y, z).cost_analysis()['flops']
+  30000.0
+  >>> jax.jit(jnp.linalg.multi_dot).lower([x, y, z]).cost_analysis()['flops']
+  30000.0
+  """
+  check_arraylike('jnp.linalg.multi_dot', *arrays)
+  arrs: list[Array] = list(map(jnp.asarray, arrays))
+  if len(arrs) < 2:
+    raise ValueError(f"multi_dot requires at least two arrays; got len(arrays)={len(arrs)}")
+  if not (arrs[0].ndim in (1, 2) and arrs[-1].ndim in (1, 2) and
+          all(a.ndim == 2 for a in arrs[1:-1])):
+    raise ValueError("multi_dot: input arrays must all be two-dimensional, except for"
+                     " the first and last array which may be 1 or 2 dimensional."
+                     f" Got array shapes {[a.shape for a in arrs]}")
+  if any(a.shape[-1] != b.shape[0] for a, b in zip(arrs[:-1], arrs[1:])):
+    raise ValueError("multi_dot: last dimension of each array must match first dimension"
+                     f" of following array. Got array shapes {[a.shape for a in arrs]}")
+  einsum_axes: list[tuple[int, ...]] = [(i, i+1) for i in range(len(arrs))]
+  if arrs[0].ndim == 1:
+    einsum_axes[0] = einsum_axes[0][1:]
+  if arrs[-1].ndim == 1:
+    einsum_axes[-1] = einsum_axes[-1][:1]
+  return jnp.einsum(*itertools.chain(*zip(arrs, einsum_axes)),  # type: ignore[arg-type, call-overload]
+                    optimize='optimal', precision=precision)

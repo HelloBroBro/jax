@@ -6,7 +6,15 @@ Best viewed [here](https://jax.readthedocs.io/en/latest/changelog.html).
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
-## jax 0.4.27
+## jax 0.4.28
+
+* Deprecations & removals
+  * The ``kind`` argument to {func}`jax.numpy.sort` and {func}`jax.numpy.argsort`
+    is now removed. Use `stable=True` or `stable=False` instead.
+
+## jaxlib 0.4.28
+
+## jax 0.4.27 (May 7, 2024)
 
 * New Functionality
   * Added {func}`jax.numpy.unstack` and {func}`jax.numpy.cumulative_sum`,
@@ -25,10 +33,6 @@ Remember to align the itemized text with the first line of an item within a list
     to the callback.
   * `complex_arr.astype(bool)` now follows the same semantics as NumPy, returning
     False where `complex_arr` is equal to `0 + 0j`, and True otherwise.
-  * Async dispatch expensive computations on the CPU backend. This only applies
-    to non-parallel computations, as we already do async dispatch for parallel
-    computations. You can recover the old behavior by setting
-    `jax.config.update('jax_cpu_enable_async_dispatch', False)`.
   * `core.Token` now is a non-trivial class which wraps a `jax.Array`. It could
     be created and threaded in and out of computations to build up dependency.
     The singleton object `core.token` has been removed, users now should create
@@ -80,7 +84,7 @@ Remember to align the itemized text with the first line of an item within a list
     dtype as the input array. This may result in some increased memory usage.
     The default value is set to `copy=False` to preserve backwards compatability.
 
-## jaxlib 0.4.27
+## jaxlib 0.4.27 (May 7, 2024)
 
 ## jax 0.4.26 (April 3, 2024)
 
