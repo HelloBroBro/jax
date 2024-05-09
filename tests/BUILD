@@ -1381,13 +1381,9 @@ py_test(
     ],
 )
 
-py_test(
+jax_test(
     name = "logging_test",
     srcs = ["logging_test.py"],
-    deps = [
-        "//jax",
-        "//jax:test_util",
-    ],
 )
 
 jax_test(
@@ -1480,6 +1476,15 @@ jax_test(
 py_test(
     name = "pretty_printer_test",
     srcs = ["pretty_printer_test.py"],
+    deps = [
+        "//jax",
+        "//jax:test_util",
+    ],
+)
+
+py_test(
+    name = "sourcemap_test",
+    srcs = ["sourcemap_test.py"],
     deps = [
         "//jax",
         "//jax:test_util",
