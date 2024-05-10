@@ -286,7 +286,7 @@ def einsum(
     subscript: str, /,
     *operands: ArrayLike,
     out: None = ...,
-    optimize: str = "optimal",
+    optimize: Union[str, builtins.bool] = "optimal",
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = False,
@@ -299,7 +299,7 @@ def einsum(
     axes: Sequence[Any], /,
     *operands: Union[ArrayLike, Sequence[Any]],
     out: None = ...,
-    optimize: str = "optimal",
+    optimize: Union[str, builtins.bool] = "optimal",
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = False,
@@ -310,7 +310,7 @@ def einsum(
     subscripts, /,
     *operands,
     out: None = ...,
-    optimize: str = ...,
+    optimize: Union[str, builtins.bool] = ...,
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = ...,
@@ -690,7 +690,8 @@ def remainder(x: ArrayLike, y: ArrayLike, /) -> Array: ...
 def repeat(a: ArrayLike, repeats: ArrayLike, axis: Optional[int] = ..., *,
            total_repeat_length: Optional[int] = ...) -> Array: ...
 def reshape(
-    a: ArrayLike, newshape: Union[DimSize, Shape], order: str = ...
+    a: ArrayLike, shape: Union[DimSize, Shape] = ...,
+    newshape: Union[DimSize, Shape] | None = ..., order: str = ...
 ) -> Array: ...
 
 def resize(a: ArrayLike, new_shape: Shape) -> Array: ...
