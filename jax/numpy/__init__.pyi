@@ -286,7 +286,7 @@ def einsum(
     subscript: str, /,
     *operands: ArrayLike,
     out: None = ...,
-    optimize: Union[str, builtins.bool] = "optimal",
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] = ...,
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = False,
@@ -299,7 +299,7 @@ def einsum(
     axes: Sequence[Any], /,
     *operands: Union[ArrayLike, Sequence[Any]],
     out: None = ...,
-    optimize: Union[str, builtins.bool] = "optimal",
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] = ...,
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = False,
@@ -310,14 +310,33 @@ def einsum(
     subscripts, /,
     *operands,
     out: None = ...,
-    optimize: Union[str, builtins.bool] = ...,
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] = ...,
     precision: PrecisionLike = ...,
     preferred_element_type: Optional[DTypeLike] = ...,
     _use_xeinsum: builtins.bool = ...,
     _dot_general: Callable[..., Array] = ...,
 ) -> Array: ...
 
-def einsum_path(subscripts, *operands, optimize =  ...): ...
+@overload
+def einsum_path(
+    subscripts: str, /,
+    *operands: ArrayLike,
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] =  ...,
+) -> tuple[list[tuple[int, ...]], Any]: ...
+@overload
+def einsum_path(
+    arr: ArrayLike,
+    axes: Sequence[Any], /,
+    *operands: Union[ArrayLike, Sequence[Any]],
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] =  ...,
+) -> tuple[list[tuple[int, ...]], Any]: ...
+@overload
+def einsum_path(
+    subscripts, /,
+    *operands: ArrayLike,
+    optimize: Union[str, builtins.bool, list[tuple[int, ...]]] =  ...,
+) -> tuple[list[tuple[int, ...]], Any]: ...
+
 def empty(shape: Any, dtype: Optional[DTypeLike] = ...,
           device: Optional[Union[_Device, _Sharding]] = ...) -> Array: ...
 def empty_like(prototype: Union[ArrayLike, DuckTypedArray],
