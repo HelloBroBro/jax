@@ -571,18 +571,6 @@ class LoweringParameters:
   # or multi-platform lowering.
   global_constant_computation: bool = False
 
-  # TODO(b/302258959): in JAX native execution we cannot lower the tokens
-  # to stablehlo.token for the top-level function, due to runtime limitations.
-  # Instead, we use dummy bool[0] arrays. This is controlled by setting
-  # replace_tokens_with_dummy to True (default). However, when exporting StableHLO
-  # we can use real tokens, because the resulting StableHLO will not be
-  # executed directly, but will be embedded as an inner function in a larger
-  # JAX or TensorFlow program. In these cases, replace_tokens_with_dummy must
-  # be set to False (for serialization versions >= 9).
-  # Once the PJRT is extended to use tokens, we can use tokens even in the
-  # native execution (and we can remove this parameter).
-  # This parameter can be removed when minimum xla_extension_version is >= 260.
-  replace_tokens_with_dummy: bool = True
 
 @dataclasses.dataclass
 class TracebackCaches:
@@ -971,13 +959,10 @@ def lower_jaxpr_to_module(
     attrs["sym_name"] = ir.StringAttr.get(module_name)
     attrs["mhlo.num_replicas"] = i32_attr(num_replicas)
     attrs["mhlo.num_partitions"] = i32_attr(num_partitions)
-    replace_tokens_with_dummy = False
     lower_jaxpr_to_fun(
         ctx, "main", jaxpr, ordered_effects,
         name_stack=name_stack,
         public=True,
-        create_tokens=replace_tokens_with_dummy,
-        replace_tokens_with_dummy=replace_tokens_with_dummy,
         num_output_tokens=0,
         replicated_args=replicated_args,
         arg_shardings=arg_shardings,
@@ -1203,8 +1188,6 @@ def lower_jaxpr_to_fun(
   input_types = [*dim_var_types, *token_types, *input_types]
   output_avals = [core.abstract_token] * (len(output_token_types) + num_tokens) + jaxpr.out_avals
   output_types = [*output_token_types, *token_types, *output_types]
-  if propagated_out_mem_kinds is None:
-    propagated_out_mem_kinds = (None,) * len(output_avals)
 
   if input_output_aliases is not None:
     token_input_output_aliases = [None] * (num_dim_vars + num_tokens)
@@ -1279,6 +1262,8 @@ def lower_jaxpr_to_fun(
   ir_result_memory_kinds = None
   custom_call_ir_result_memory_kinds = None
   if result_memory_kinds is not None:
+    if propagated_out_mem_kinds is None:
+      propagated_out_mem_kinds = (None,) * len(result_memory_kinds)
     res, custom_call_res = [], []
     for pom, mk, types in zip(propagated_out_mem_kinds, result_memory_kinds,
                               output_types):
