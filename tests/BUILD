@@ -632,6 +632,11 @@ jax_test(
 )
 
 jax_test(
+    name = "cholesky_update_test",
+    srcs = ["cholesky_update_test.py"],
+)
+
+jax_test(
     name = "metadata_test",
     srcs = ["metadata_test.py"],
     disable_backends = [
@@ -999,8 +1004,7 @@ jax_test(
     ],
     enable_configs = [
         "gpu_a100",
-        # TODO(b/337303303): re-enable the test
-        # "gpu_h100",
+        "gpu_h100",
     ],
     deps = [
         "//jax:experimental_sparse",
