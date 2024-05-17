@@ -837,19 +837,23 @@ class FragmentedArrayTest(TestCase):
       op, np_op = op
     else:
       np_op = op
-    def kernel(ctx, dst, _):
-      f32 = ir.F32Type.get()
-      iota = iota_tensor(m=m, n=n, mlir_dtype=f32)
-      op(iota, iota).store_untiled(dst)
-    out_shape = jax.ShapeDtypeStruct((m, n), jnp.float32)
-    result = mosaic_gpu.as_gpu_kernel(
-        kernel, (1, 1, 1), (128, 1, 1), (), out_shape, ()
-    )()
-    x = np.arange(m * n, dtype=jnp.float32).reshape(m, n)
-    if op == operator.truediv:
-      np.testing.assert_allclose(result, np_op(x, x), atol=2e-7)
-    else:
-      np.testing.assert_array_equal(result, np_op(x, x))
+
+    for scalar_rhs in [None, 2]:
+      def kernel(ctx, dst, _):
+        f32 = ir.F32Type.get()
+        iota = iota_tensor(m=m, n=n, mlir_dtype=f32)
+        rhs = iota if scalar_rhs is None else c(scalar_rhs, iota.mlir_dtype)
+        op(iota, rhs).store_untiled(dst)
+      out_shape = jax.ShapeDtypeStruct((m, n), jnp.float32)
+      result = mosaic_gpu.as_gpu_kernel(
+          kernel, (1, 1, 1), (128, 1, 1), (), out_shape, ()
+      )()
+      ref_x = np.arange(m * n, dtype=jnp.float32).reshape(m, n)
+      ref_rhs = scalar_rhs or ref_x
+      if op == operator.truediv:
+        np.testing.assert_allclose(result, np_op(ref_x, ref_rhs), atol=2e-7)
+      else:
+        np.testing.assert_array_equal(result, np_op(ref_x, ref_rhs))
 
   @parameterized.product(
       ops=((lambda x: mgpu.FragmentedArray.exp(x), np.exp),),
@@ -890,6 +894,22 @@ class FragmentedArrayTest(TestCase):
       expected = np.broadcast_to(x.max(axis=1, keepdims=True), x.shape)
     else:
       raise NotImplementedError(f"Unsupported op: {op}")
+    np.testing.assert_array_equal(result, expected)
+
+  def test_splat_layout(self):
+    m, n = 64, 8
+    def kernel(ctx, dst, _):
+      f32 = ir.F32Type.get()
+      iota = iota_tensor(m=m, n=n, mlir_dtype=f32)
+      cte = c(1, iota.mlir_dtype)
+      cte_arr = mgpu.FragmentedArray.splat(cte, ())
+      cte_arr = cte_arr.reshape((1, 1)).broadcast((m, n))
+      (iota + cte_arr).store_untiled(dst)
+    out_shape = jax.ShapeDtypeStruct((m, n), jnp.float32)
+    result = mosaic_gpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), (), out_shape, ()
+    )()
+    expected = np.arange(m * n, dtype=jnp.float32).reshape(m, n) + 1
     np.testing.assert_array_equal(result, expected)
 
   def test_splat(self):
