@@ -38,9 +38,7 @@ import numpy as np
 WARPGROUP_SIZE: int = 128
 DYNAMIC = -9223372036854775808
 
-FLAGS = flags.FLAGS
-
-flags.DEFINE_bool("mosaic_gpu_debug", False, "Perform debug printing")
+_MOSAIC_GPU_DEBUG = flags.DEFINE_bool("mosaic_gpu_debug", False, "Perform debug printing")
 
 # pylint: disable=line-too-long, wildcard-import, missing-function-docstring, bad-continuation, g-bad-todo, protected-access, g-explicit-length-test, missing-class-docstring, g-doc-return-or-yield, g-inconsistent-quotes
 
@@ -113,7 +111,7 @@ def get_tensormap_descriptor(**attrs):
 
 
 def debug_print(fmt, *args, uniform=True):
-  if not FLAGS.mosaic_gpu_debug:
+  if not _MOSAIC_GPU_DEBUG.value:
     return
   type_formats = []
   new_args = []
@@ -680,3 +678,26 @@ def tile_shape(shape, tiling):
       *(s // t for s, t in zip(shape[-tiling_rank:], tiling)),
       *tiling,
   )
+
+
+def warp_tree_reduce(value, op, group_size):
+  """Reduce a value across the warpgroup."""
+  assert 32 % group_size == 0 and group_size <= 32
+  i32 = ir.IntegerType.get_signless(32)
+  result = value
+  iters = np.log2(group_size)
+  if not iters.is_integer():
+    raise ValueError(f"Warp reduction group size should be a power of 2 (got {group_size})")
+  iters = int(iters)
+  for i in range(iters):
+    other_result = nvvm.shfl_sync(
+        result.type,
+        c(0xFFFFFFFF, i32),
+        result,
+        c(1 << i, i32),
+        c(0x1F, i32),
+        nvvm.ShflKind.bfly,
+    )
+    result = op(result, other_result)
+
+  return result

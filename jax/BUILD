@@ -27,6 +27,7 @@ load(
     "jax_internal_test_harnesses_visibility",
     "jax_test_util_visibility",
     "jax_visibility",
+    "mosaic_gpu_internal_users",
     "mosaic_internal_users",
     "pallas_gpu_internal_users",
     "pallas_tpu_internal_users",
@@ -135,7 +136,7 @@ package_group(
     packages = [
         "//...",
         "//learning/brain/research/jax",
-    ],
+    ] + mosaic_gpu_internal_users,
 )
 
 # JAX-private test utilities.
@@ -300,6 +301,7 @@ py_library_providing_imports_info(
         ":cloud_tpu_init",
         ":compilation_cache_internal",
         ":compiler",
+        ":compute_on",
         ":config",
         ":core",
         ":custom_api_util",
@@ -461,6 +463,7 @@ pytype_strict_library(
         "_src/linear_util.py",
     ],
     deps = [
+        ":compute_on",
         ":config",
         ":dtypes",
         ":effects",
@@ -710,6 +713,7 @@ pytype_strict_library(
     deps = [
         ":ad_util",
         ":api_util",
+        ":compute_on",
         ":config",
         ":core",
         ":dtypes",
@@ -775,6 +779,12 @@ pytype_strict_library(
         ":xla_bridge",
         "//jax/_src/lib",
     ],
+)
+
+pytype_strict_library(
+    name = "compute_on",
+    srcs = ["_src/compute_on.py"],
+    deps = [],
 )
 
 pytype_strict_library(

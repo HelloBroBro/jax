@@ -18,7 +18,7 @@ from collections import Counter, defaultdict, deque, namedtuple
 from collections.abc import (Collection, Generator, Hashable, Iterable,
                              Iterator, Set, Sequence, MutableSet,
                              MutableMapping)
-from contextlib import contextmanager
+from contextlib import contextmanager, ContextDecorator, ExitStack
 from dataclasses import dataclass
 import functools
 from functools import partial, partialmethod, total_ordering
@@ -39,6 +39,7 @@ import numpy as np
 from jax._src import dtypes
 from jax._src import config
 from jax._src import effects
+from jax._src import compute_on
 from jax._src.errors import (
     ConcretizationTypeError, TracerArrayConversionError, TracerBoolConversionError,
     TracerIntegerConversionError, UnexpectedTracerError)
@@ -79,7 +80,7 @@ class JaxprDebugInfo(NamedTuple):
   traced_for: str     # e.g. 'jit', 'scan', etc
   func_src_info: str  # e.g. f'{fun.__name__} at {filename}:{lineno}'
   arg_names: tuple[str | None, ...]     # e.g. ('args[0]', ... )
-  result_paths: tuple[str | None, ...]  # e.g. ('[0]', '[1]', ...)
+  result_paths: tuple[str, ...]  # e.g. ('[0]', '[1]', ...)
 
 class Jaxpr:
   __slots__ = ['__weakref__', '_constvars', '_invars', '_outvars', '_eqns',
@@ -259,6 +260,29 @@ def jaxpr_as_fun(closed_jaxpr: ClosedJaxpr, *args):
   return eval_jaxpr(closed_jaxpr.jaxpr, closed_jaxpr.consts, *args)
 
 
+class JaxprEqnContext(ContextDecorator):
+  compute_type: str | None
+  _exit_stack: ExitStack
+  _managers: list[tuple[Any, Any]]
+
+  def __init__(self, compute_type: str | None):
+    self.compute_type = compute_type
+    self._exit_stack = ExitStack()
+    self._managers = [(compute_on.extend_compute_type, self.compute_type)]
+
+  def __enter__(self):
+    for manager, val in self._managers:
+      self._exit_stack.enter_context(manager(val))
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self._exit_stack.close()
+    return False
+
+  def __repr__(self):
+    return f'JaxprEqnContext(compute_type={self.compute_type})'
+
+
 class JaxprEqn(NamedTuple):
   invars: list[Atom]
   outvars: list[Var]
@@ -266,6 +290,7 @@ class JaxprEqn(NamedTuple):
   params: dict[str, Any]
   effects: Effects
   source_info: source_info_util.SourceInfo
+  ctx: JaxprEqnContext
 
   def __repr__(self):
     return str(pp_eqn(self, JaxprPpContext(), JaxprPpSettings())).rstrip()
@@ -278,6 +303,7 @@ class JaxprEqn(NamedTuple):
       params: dict[str, Any] | None = None,
       effects: Effects | None = None,
       source_info: source_info_util.SourceInfo | None = None,
+      ctx: JaxprEqnContext | None = None
   ):
     # It is slightly faster to rebuild the tuple directly than to call _replace.
     return JaxprEqn(
@@ -287,16 +313,19 @@ class JaxprEqn(NamedTuple):
       self.params if params is None else params,
       self.effects if effects is None else effects,
       self.source_info if source_info is None else source_info,
+      self.ctx if ctx is None else ctx,
     )
 
 
 # TODO(mattjj): call typecheck rules here, so we don't form bad eqns
-def new_jaxpr_eqn(invars, outvars, primitive, params, effects, source_info=None):
+def new_jaxpr_eqn(invars, outvars, primitive, params, effects, source_info=None,
+                  ctx=None):
   source_info = source_info or source_info_util.new_source_info()
+  ctx = ctx or JaxprEqnContext(None)
   if config.enable_checks.value:
     assert all(isinstance(x, (Var, Literal)) for x in  invars)
     assert all(isinstance(v,  Var)           for v in outvars)
-  return JaxprEqn(invars, outvars, primitive, params, effects, source_info)
+  return JaxprEqn(invars, outvars, primitive, params, effects, source_info, ctx)
 
 _var_counter = it.count()
 
@@ -452,7 +481,7 @@ def eval_jaxpr(jaxpr: Jaxpr, consts, *args, propagate_source_info=True) -> list[
     subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
     name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
     traceback = eqn.source_info.traceback if propagate_source_info else None
-    with source_info_util.user_context(traceback, name_stack=name_stack):
+    with source_info_util.user_context(traceback, name_stack=name_stack), eqn.ctx:
       ans = eqn.primitive.bind(*subfuns, *map(read, eqn.invars), **bind_params)
     if eqn.primitive.multiple_results:
       map(write, eqn.outvars, ans)
