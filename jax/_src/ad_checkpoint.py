@@ -33,7 +33,6 @@ from jax._src import effects
 from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import util
-from jax._src import compute_on
 from jax._src.api_util import flatten_fun, shaped_abstractify
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
@@ -559,10 +558,9 @@ def remat_partial_eval(trace, *tracers, jaxpr, **params):
   out_jaxpr_tracers = [pe.JaxprTracer(trace, pe.PartialVal.unknown(x.aval), None)
                        for x in jaxpr_unknown.outvars]
   new_params = dict(params, jaxpr=jaxpr_unknown, differentiated=True)
-  ctx = core.JaxprEqnContext(compute_on.current_compute_type())
   recipe = pe.new_eqn_recipe(in_jaxpr_tracers, out_jaxpr_tracers, remat_p,
                              new_params, jaxpr_unknown.effects,
-                             source_info_util.current(), ctx)
+                             source_info_util.current())
 
   # log info about saved residuals
   log_level = logging.WARNING if config.log_checkpoint_residuals.value else logging.DEBUG
@@ -660,7 +658,7 @@ def _transpose_jaxpr(jaxpr, in_lin, out_zeros):
 
   transposed_jaxpr_, _, consts, () = pe.trace_to_jaxpr_dynamic(transposed, in_avals)
   transposed_jaxpr = core.ClosedJaxpr(transposed_jaxpr_, consts)
-  return transposed_jaxpr, cell.in_cts_zero  # type: ignore
+  return transposed_jaxpr, cell.in_cts_zero  # pytype: disable=attribute-error
 
 def remat_vmap(spmd_axis_name, axis_size, axis_name, main_type, args, dims, *,
                jaxpr, **params):
