@@ -193,6 +193,21 @@ async def async_serialize(
     primary_host: Optional[int] = 0,
     replica_id: int = 0,
 ):
+  """Serialize an array using TensorStore.
+
+  Args:
+    arr_inp: The array to serialize.
+    tensorstore_spec: The tensorstore spec to use.
+    commit_future: A list of futures that will be appended to. The futures can
+      be awaited asynchronously. If None, the futures will be awaited
+      synchronously by this method.
+    context: ts.Context instance.
+    primary_host: Primary host, which indicates the host that will be treated as
+      the "leader". If None, all hosts are treated as the primary. DO NOT USE
+      unless you are sure you know what you are doing.
+    replica_id: Allows overriding the shard replica id that will be saved.
+      DO NOT USE unless you are sure you know what you are doing.
+  """
   if (isinstance(arr_inp, array.ArrayImpl) and jax.process_count() > 1 and
       arr_inp.is_fully_addressable):
     raise ValueError(
@@ -202,7 +217,9 @@ async def async_serialize(
         f'the path "{tensorstore_spec["kvstore"]["path"]}".')
 
   if primary_host is None and is_remote_storage(tensorstore_spec):
-    raise ValueError(
+    # Not strictly an error because users may manually split directories into
+    # per-process subdirectories.
+    logging.warning(
         'When primary_host is set to None and remote storage is used,'
         ' serialization is not allowed, as this may lead to a race condition'
         ' between processes.'
@@ -338,12 +355,16 @@ async def async_deserialize(
     out = np.zeros(new_shard_shape, dtype=t.dtype.numpy_dtype)
     await ts.array(out)[ts.d[:].translate_to[requested_domain.origin]][
         restricted_domain].write(t[restricted_domain])
-    # Convert to jnp array so that layouts are initialized properly.
-    out = jnp.asarray(out)  # type: ignore
     if dtype is not None:
       # Cast while reloading on process to avoid 2 copies on device if the
       # casting is done on device.
       out = out.astype(dtype)
+    # Convert to jnp array so that layouts are initialized properly for
+    # sub-byte dtypes.
+    # TODO(yashkatariya): This is a band-aid fix. Figure out a better way to
+    # make this work.
+    if out.dtype == jnp.int4:
+      out = jnp.asarray(out)  # type: ignore
     result = jax.device_put(
         out, Layout(dll, jax.sharding.SingleDeviceSharding(device)))
     if byte_limiter is not None:
