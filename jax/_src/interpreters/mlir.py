@@ -1403,7 +1403,10 @@ def lower_jaxpr_to_fun(
         [num_dim_vars, num_tokens])
     tokens_in = TokenSet(zip(effects, token_args))
     args: list[list[ir.Value]] = unflattened_args
-    callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
+    if name is not None:
+      callee_name_stack = name_stack.extend(util.wrap_name(name, api_name))
+    else:
+      callee_name_stack = name_stack
     consts = [ir_constants(xla.canonicalize_dtype(x)) for x in jaxpr.consts]
     out_vals, tokens_out = jaxpr_subcomp(
         ctx, jaxpr.jaxpr, callee_name_stack, tokens_in,
@@ -1544,7 +1547,8 @@ def jaxpr_subcomp(ctx: ModuleContext, jaxpr: core.Jaxpr,
     source_info = eqn.source_info.replace(
         name_stack=name_stack + eqn.source_info.name_stack)
     loc = _source_info_to_location(ctx, eqn.primitive, eqn.params, source_info)
-    with source_info_util.user_context(eqn.source_info.traceback), loc:
+    with (source_info_util.user_context(eqn.source_info.traceback), loc,
+          eqn.ctx.manager):
       override_rule = get_override_lowering_rule(eqn.primitive)
       platform_rules: dict[str, LoweringRule] = {}
       default_rule: LoweringRule | None = None
@@ -1860,7 +1864,7 @@ def core_call_lowering(ctx: LoweringRuleContext,
 
 register_lowering(core.call_p, partial(core_call_lowering, name="core_call"))
 register_lowering(core.closed_call_p,
-                  partial(core_call_lowering, name="core_closed_call"))
+                  partial(core_call_lowering, name=None))
 
 def broadcast_in_dim(ctx: LoweringRuleContext, op, aval_out: core.AbstractValue, *,
                      broadcast_dimensions) -> ir.Value:

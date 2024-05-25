@@ -54,7 +54,7 @@ setup(
     package_data={'jax': ['py.typed', "*.pyi", "**/*.pyi"]},
     python_requires='>=3.9',
     install_requires=[
-        'ml_dtypes>=0.2.0',
+        'ml_dtypes>=0.4.0',
         'numpy>=1.22',
         "numpy>=1.23.2; python_version>='3.11'",
         "numpy>=1.26.0; python_version>='3.12'",
@@ -98,7 +98,7 @@ setup(
         "nvidia-cuda-nvcc-cu12>=12.1.105",
         "nvidia-cuda-runtime-cu12>=12.1.105",
         # https://docs.nvidia.com/deeplearning/cudnn/developer/misc.html#cudnn-api-compatibility
-        "nvidia-cudnn-cu12>=8.9.2.26,<9.0",
+        "nvidia-cudnn-cu12>=9.0,<10.0",
         "nvidia-cufft-cu12>=11.0.2.54",
         "nvidia-cusolver-cu12>=11.4.5.107",
         "nvidia-cusparse-cu12>=12.1.0.106",
@@ -120,7 +120,7 @@ setup(
           "nvidia-cuda-cupti-cu12>=12.1.105",
           "nvidia-cuda-nvcc-cu12>=12.1.105",
           "nvidia-cuda-runtime-cu12>=12.1.105",
-          "nvidia-cudnn-cu12>=8.9.2.26,<9.0",
+          "nvidia-cudnn-cu12>=9.0,<10.0",
           "nvidia-cufft-cu12>=11.0.2.54",
           "nvidia-cusolver-cu12>=11.4.5.107",
           "nvidia-cusparse-cu12>=12.1.0.106",

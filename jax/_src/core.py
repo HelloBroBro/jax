@@ -173,7 +173,6 @@ class Jaxpr:
     return jaxpr
 
 
-
 def join_effects(*effects: Effects) -> Effects:
   return set().union(*effects) if effects else no_effects
 
@@ -262,9 +261,13 @@ def jaxpr_as_fun(closed_jaxpr: ClosedJaxpr, *args):
 
 class JaxprEqnContext:
 
-  def __init__(self, compute_type: str | None):
+  def __init__(self, compute_type: str | None, threefry_partitionable: bool):
     self.compute_type = compute_type
-    self._managers = [(compute_on.extend_compute_type, self.compute_type)]
+    self.threefry_partitionable = threefry_partitionable
+    self._managers = [
+        (compute_on.extend_compute_type, self.compute_type),
+        (config.threefry_partitionable.__call__, self.threefry_partitionable),
+    ]
 
   @property
   @contextmanager
@@ -275,7 +278,8 @@ class JaxprEqnContext:
       yield
 
   def __repr__(self):
-    return f'JaxprEqnContext(compute_type={self.compute_type})'
+    return (f"JaxprEqnContext(compute_type={self.compute_type},"
+            f"threefry_partitionable={self.threefry_partitionable})")
 
 
 class JaxprEqn(NamedTuple):
@@ -316,7 +320,8 @@ class JaxprEqn(NamedTuple):
 def new_jaxpr_eqn(invars, outvars, primitive, params, effects, source_info=None,
                   ctx=None):
   source_info = source_info or source_info_util.new_source_info()
-  ctx = ctx or JaxprEqnContext(compute_on.current_compute_type())
+  ctx = ctx or JaxprEqnContext(compute_on.current_compute_type(),
+                               config.threefry_partitionable.value)
   if config.enable_checks.value:
     assert all(isinstance(x, (Var, Literal)) for x in  invars)
     assert all(isinstance(v,  Var)           for v in outvars)
@@ -2409,6 +2414,8 @@ class ClosedCallPrimitive(CallPrimitive):
 
 closed_call_p: ClosedCallPrimitive = ClosedCallPrimitive('closed_call')
 closed_call_p.def_impl(call_impl)
+closed_call_p.def_effectful_abstract_eval(
+    lambda *_, call_jaxpr: (call_jaxpr.out_avals, call_jaxpr.effects))
 
 
 outfeed_primitives: set[Primitive] = set()
@@ -2852,7 +2859,7 @@ custom_typechecks: dict[Primitive, Callable] = {}
 
 def _check_closed_call(_, *in_atoms, call_jaxpr):
   in_avals = [x.aval for x in in_atoms]
-  if list(in_avals) != list(call_jaxpr.in_avals):
+  if not all(map(typecompat, call_jaxpr.in_avals, in_avals)):
     raise JaxprTypeError("Closed call in_avals mismatch")
   return call_jaxpr.out_avals, call_jaxpr.effects
 custom_typechecks[closed_call_p] = _check_closed_call
