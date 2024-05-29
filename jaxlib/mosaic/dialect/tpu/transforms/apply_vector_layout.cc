@@ -827,7 +827,8 @@ LogicalResult trunc_op_rule_impl(RewriteContext &ctx, OpTy op,
           ++idxs_local.back();
         }
       }
-      *v = builder.create<PackSubelementsOp>(res_vreg_ty, parts);
+      *v = builder.create<PackSubelementsOp>(res_vreg_ty, parts,
+                                             tpu::PackFormat::kCompressed);
     });
   } else if (layout_out.hasNativeTiling(ctx.target_shape)) {
     int packing = layout_out.packing();
@@ -848,7 +849,8 @@ LogicalResult trunc_op_rule_impl(RewriteContext &ctx, OpTy op,
           parts.push_back(parts.back());
         }
       }
-      *v = builder.create<PackSubelementsOp>(res_vreg_ty, parts);
+      *v = builder.create<PackSubelementsOp>(res_vreg_ty, parts,
+                                             tpu::PackFormat::kCompressed);
       parts.clear();
     });
   } else {
@@ -3454,6 +3456,10 @@ LogicalResult vector_shape_cast_rule(RewriteContext &ctx, Operation &op,
   using Tiling = std::array<int64_t, 2>;
   const VectorLayout &layout_in = *layouts_in.front();
   const VectorLayout &layout_out = *layouts_out.front();
+  TPU_ASSERT_EQ_OP(
+      layout_in.bitwidth(),
+      layout_out.bitwidth());  // This should be guaranteed through MLIR
+                               // verifier plus our layoutIsValidForValue check
   ImplicitLocOpBuilder builder(op.getLoc(), &op);
   auto shape_cast_op = cast<vector::ShapeCastOp>(op);
   const VectorType src_ty = shape_cast_op.getSourceVectorType();
@@ -3462,6 +3468,10 @@ LogicalResult vector_shape_cast_rule(RewriteContext &ctx, Operation &op,
   const ArrayRef<int64_t> dst_shape = dst_ty.getShape();
   const int layout_rank = layout_in.layout_rank();
   bool no_op = false;
+  const std::array<int64_t, 2> src_vreg_slice =
+      layout_in.vregSlice(ctx.target_shape);
+  const std::array<int64_t, 2> dst_vreg_slice =
+      layout_out.vregSlice(ctx.target_shape);
   // TODO(tlongeri): It looks like this could probably be simplified by using
   // VectorLayout::implicitShape()
   if (layout_in == layout_out && src_ty.getShape().take_back(layout_rank) ==
@@ -3508,33 +3518,23 @@ LogicalResult vector_shape_cast_rule(RewriteContext &ctx, Operation &op,
              layout_out.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
              layout_in.offsets() == layout_out.offsets() &&
              layout_in.offsets() == LayoutOffsets{0, 0} &&
-             layout_in.tiling() == Tiling{1, ctx.target_shape[1]} &&
-             layout_out.hasNaturalTopology(ctx.target_shape) &&
-             *(dst_shape.end() - 1) != *(src_shape.end() - 1) &&
-             *(dst_shape.end() - 1) == ctx.target_shape[1] &&
-             *(dst_shape.end() - 2) % ctx.target_shape[0] == 0 &&
-             *(src_shape.end() - 1) %
-                     (ctx.target_shape[0] * ctx.target_shape[1]) ==
-                 0 &&
-             (*(src_shape.end() - 2) == 1 ||
-              *(src_shape.end() - 2) % ctx.target_shape[0] == 0)) {
-    // Shapecast (..., m * 128) -> (..., 128).
+             layout_in.tiling()[0] == 1 &&
+             layout_out.hasNativeTiling(ctx.target_shape) &&
+             *(dst_shape.end() - 1) == dst_vreg_slice[1] &&
+             *(dst_shape.end() - 2) % dst_vreg_slice[0] == 0 &&
+             *(src_shape.end() - 1) % src_vreg_slice[1] == 0) {
+    // Shapecast (..., m * 128 * packing) -> (..., 128).
     no_op = true;
   } else if (layout_in.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
              layout_out.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
              layout_in.offsets() == LayoutOffsets{0, 0} &&
              layout_out.offsets() == LayoutOffsets{0, 0} &&
-             layout_in.hasNaturalTopology(ctx.target_shape) &&
-             layout_out.tiling() == Tiling{1, ctx.target_shape[1]} &&
-             *(src_shape.end() - 1) != *(dst_shape.end() - 1) &&
-             *(src_shape.end() - 1) == ctx.target_shape[1] &&
-             *(src_shape.end() - 2) % ctx.target_shape[0] == 0 &&
-             *(dst_shape.end() - 1) %
-                     (ctx.target_shape[0] * ctx.target_shape[1]) ==
-                 0 &&
-             (*(dst_shape.end() - 2) == 1 ||
-              *(dst_shape.end() - 2) % ctx.target_shape[0] == 0)) {
-    // Shapecast (..., 128) -> (..., m * 128).
+             layout_in.hasNativeTiling(ctx.target_shape) &&
+             layout_out.tiling()[0] == 1 &&
+             *(src_shape.end() - 1) == src_vreg_slice[1] &&
+             *(src_shape.end() - 2) % src_vreg_slice[0] == 0 &&
+             *(dst_shape.end() - 1) % dst_vreg_slice[1] == 0) {
+    // Shapecast (..., 128) -> (..., m * 128 * packing).
     no_op = true;
   }
   FAILUREOR_ASSIGN_OR_RETURN(
@@ -4578,10 +4578,8 @@ FailureOr<TypedValue<VectorType>> relayout(
   } else if (  // TODO(b/265133506): Generalize retiling.
                // (8,128) -> (8 * packing,128) tiling change for packed type.
       src.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
-      dst.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
-      vty.getElementTypeBitWidth() < 32 &&
-      32 % vty.getElementTypeBitWidth() == 0 &&
-      src.offsets() == dst.offsets() &&
+      dst.implicit_dim() == VectorLayout::ImplicitDim::kNone && bitwidth < 32 &&
+      32 % bitwidth == 0 && src.offsets() == dst.offsets() &&
       src.tiling() == std::array<int64_t, 2>{8, 128} &&
       dst.tiling() == std::array<int64_t, 2>{8 * dst.packing(), 128}) {
     const VectorLayout new_src(src.bitwidth(), src.offsets(), dst.tiling());
@@ -4608,7 +4606,93 @@ FailureOr<TypedValue<VectorType>> relayout(
         }
       }
       *tile = builder.create<tpu::PackSubelementsOp>(
-          v.getLoc(), src_tiles.begin()->getType(), parts);
+          v.getLoc(), src_tiles.begin()->getType(), parts,
+          tpu::PackFormat::kCompressed);
+    });
+    src = new_src;
+    src_tiles = std::move(src_tiles_retiled);
+  } else if (  // Handle retiling from (1, 128 * packing) to (packing, 128) for
+               // packed data.
+               // We do compressed unpacking followed by interleaved packing.
+               // TODO(tlongeri): This can be used as a first step before using
+               // a generalized retiling where we only move sublanes around
+               // (without packing/unpacking).
+               // TODO(tlongeri): Interleaved unpacking followed by interleaved
+               // packing (but with different pairings) might also be
+               // interesting if the next step is a retile, since we can also
+               // match corresponding elements without shifting. It's just that
+               // the tiles are not adjacent (no contiguous vreg slice).
+      src.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
+      dst.implicit_dim() == VectorLayout::ImplicitDim::kNone && bitwidth < 32 &&
+      32 % bitwidth == 0 && src.offsets() == dst.offsets() &&
+      src.tiling() == std::array<int64_t, 2>{1, 128 * packing} &&
+      dst.tiling() == std::array<int64_t, 2>{packing, 128}) {
+    // To illustrate, consider a 2 x 16 16-bit shape laid out in vregs of
+    // 4 sublanes and 2 lanes (this is convenient for to keep the example small
+    // yet non-trivial) with (1, 4) tiling. We will relayout to (2, 2) tiling.
+    //
+    // The vreg slice is 1 x 16, that is, the vreg contains the data for a
+    // 1 x 16 window of the logical shape.
+    //
+    // [a b c d e f g h i j k l m n o p] -> vreg 1
+    // [A B C D E F G H I J K L M N O P] -> vreg 2
+    //
+    // Note: we support multiple vregs per row of the logical shape, but we use
+    //       one here just to keep the example small.
+    //
+    // When we do a compressed unpack, the resulting vregs effectively have a
+    // tiling of (1, 2) and cover a vreg slice of 1 x 8 logical elements.
+    //
+    // [a b c d e f g h] -> vreg 1, part 1   [i j k l m n o p] -> vreg 1, part 2
+    // [A B C D E F G H] -> vreg 2, part 1   [I J K L M N O P] -> vreg 2, part 2
+    //
+    // It is clear that if combine vreg 1, part 1 and vreg 2, part 1 we get data
+    // that covers a 2 x 8 vreg slice. Note, however, that we will have to mind
+    // the internal ordering of the vreg.
+    //
+    // [a b c d e f g h                      [i j k l m n o p
+    //  A B C D E F G H] -> new vreg 1        I J K L M N O P] -> new vreg 2
+    //
+    // To see if we can get the right internal ordering that we need for (2, 2)
+    // tiling, let's break new vreg 1 into (1, 2) rows, which correspond to
+    // sublanes when unpacked and half-sublanes when packed.
+    //
+    // [(a b) (c d) (e f) (g h)
+    //  (A B) (C D) (E F) (G H)]
+    //
+    // The sublane order for the vreg parts is [(a b) (c d) ...] for vreg 1,
+    // part 1 and [(A B) (C D) ...] for vreg 2, part 1.
+    //
+    // The desired half-sublane order, for packed (2, 2) tiling, is
+    // [(a b) (A B) (c d) (C D) ...]. That is, traverse down each column before
+    // moving to the next one. This is exactly an interleaving of the sublanes
+    // of the vreg parts.
+    const VectorLayout new_src(src.bitwidth(), src.offsets(),
+                               std::array<int64_t, 2>{packing, 128});
+    xla::Array<Value> src_tiles_retiled(
+        new_src.tileArrayShape(vty.getShape(), target_shape));
+    const VectorType vreg_x32 =
+        vty.getElementType().isSignlessInteger()
+            ? VectorType::get(target_shape, builder.getI32Type())
+            : VectorType::get(target_shape, builder.getF32Type());
+    src_tiles_retiled.Each([&](absl::Span<const int64_t> idx, Value *tile) {
+      SmallVector<Value> parts;
+      parts.reserve(packing);
+      SmallVector<int64_t> src_idx(toArrayRef(idx));
+      *(src_idx.end() - 2) *= packing;
+      const int64_t vreg_part = *(src_idx.end() - 1) % packing;
+      *(src_idx.end() - 1) /= packing;
+      for (int i = 0; i < packing; ++i) {
+        parts.push_back(builder.create<tpu::UnpackSubelementsOp>(
+            v.getLoc(), vreg_x32, src_tiles(src_idx), vreg_part));
+        if (*(src_idx.end() - 2) < *(src_tiles.dimensions().end() - 2)) {
+          ++*(src_idx.end() - 2);
+        }  // The rest is padding, so just pick any of the input parts (but not
+           // an arbitrary vreg so we don't add an extra dependency).
+      }
+      *tile = builder.create<tpu::PackSubelementsOp>(
+          v.getLoc(), src_tiles.begin()->getType(), parts,
+          tpu::PackFormat::kInterleaved);
     });
     src = new_src;
     src_tiles = std::move(src_tiles_retiled);
