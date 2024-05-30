@@ -61,6 +61,7 @@ from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import mlir
 from jax._src.interpreters import xla
 from jax._src.layout import DeviceLocalLayout, AutoLayout, Layout
+from jax._src.lib import xla_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import hlo
@@ -556,7 +557,7 @@ def parallel_callable(fun: lu.WrappedFun,
                       donated_invars: Sequence[bool],
                       is_explicit_global_axis_size: bool,
                       *avals):
-  pmap_computation = lower_parallel_callable(
+  pmap_computation, _ = lower_parallel_callable(
       fun, backend_name, axis_name, axis_size, global_axis_size, devices, name,
       in_axes, out_axes_thunk, donated_invars,
       is_explicit_global_axis_size, avals,
@@ -679,7 +680,7 @@ def lower_parallel_callable(
     is_explicit_global_axis_size: bool,
     avals: Sequence[core.AbstractValue],
     *,
-    lowering_parameters: mlir.LoweringParameters) -> PmapComputation:
+    lowering_parameters: mlir.LoweringParameters) -> tuple[PmapComputation, core.ClosedJaxpr]:
   # Determine global_axis_size for use in AxisEnv.
   # TODO(mattjj,skyewm): revive this check (inner_pmap always False now)
   # if xb.process_count() > 1 and global_axis_size is None and inner_pmap:
@@ -761,6 +762,7 @@ def lower_parallel_callable(
   tuple_args = dispatch.should_tuple_args(len(shards.global_sharded_avals),
                                           backend.platform)
   module_name = f"pmap_{fun.__name__}"
+  platforms = lowering_parameters.platforms or (backend.platform,)
   with maybe_extend_axis_env(axis_name, global_axis_size, None):
     ordered_effects = list(
         effects.ordered_effects.filter_in(closed_jaxpr.effects))
@@ -776,7 +778,7 @@ def lower_parallel_callable(
           closed_jaxpr,
           ordered_effects=ordered_effects,
           backend_or_name=backend,
-          platforms=lowering_parameters.platforms or (backend.platform,),
+          platforms=platforms,
           axis_context=sharding_impls.ReplicaAxisContext(axis_env),
           name_stack=name_stack,
           donated_args=donated_invars,
@@ -787,14 +789,16 @@ def lower_parallel_callable(
           result_names=jaxpr.debug_info and jaxpr.debug_info.result_paths,
           num_replicas=replicas.num_global_replicas,
           lowering_parameters=lowering_parameters)
-  return PmapComputation(lowering_result.module, pci=pci, replicas=replicas,
+  return PmapComputation(lowering_result.module,
+                         platforms=platforms,
+                         pci=pci, replicas=replicas,
                          shards=shards, tuple_args=tuple_args,
                          unordered_effects=unordered_effects,
                          ordered_effects=ordered_effects,
                          keepalive=lowering_result.keepalive,
                          host_callbacks=lowering_result.host_callbacks,
                          jaxpr_debug_info=closed_jaxpr.jaxpr.debug_info,
-                         shape_poly_state=lowering_result.shape_poly_state)
+                         shape_poly_state=lowering_result.shape_poly_state), closed_jaxpr
 
 
 def _pmap_unmap_shaped_array(
@@ -907,10 +911,13 @@ class UnloadedPmapExecutable:
                host_callbacks: list[Any],
                keepalive: Any,
                jaxpr_debug_info: core.JaxprDebugInfo,
+               platforms: Sequence[str],
                shape_poly_state: mlir.ShapePolyLoweringState | None = None,
                compiler_options=None):
+    del platforms
     if shape_poly_state is not None and shape_poly_state.uses_dim_vars:
       hlo = mlir.refine_polymorphic_shapes(hlo)
+
     devices = pci.devices
     if devices is None:
       if shards.num_global_shards > xb.device_count(pci.backend):
@@ -1115,14 +1122,15 @@ class ExecuteReplicated:
   __slots__ = ['xla_executable', 'name', 'backend', 'in_handler', 'out_handler',
                'has_unordered_effects', 'ordered_effects', 'keepalive',
                'has_host_callbacks', '_local_devices', 'kept_var_idx',
-               'mut', '__weakref__']
+               'mut', 'pgle_profiler', '__weakref__']
 
   def __init__(self, xla_executable, name, backend, in_handler: InputsHandler,
                out_handler: ResultsHandler,
                unordered_effects: list[core.Effect],
                ordered_effects: list[core.Effect], keepalive: Any,
                has_host_callbacks: bool, kept_var_idx: set[int],
-               mut: MutationData | None):
+               mut: MutationData | None,
+               pgle_profiler: profiler.PGLEProfiler | None = None):
     self.xla_executable = xla_executable
     self.name = name
     self.backend = backend
@@ -1135,6 +1143,7 @@ class ExecuteReplicated:
     self.has_host_callbacks = has_host_callbacks
     self.kept_var_idx = kept_var_idx
     self.mut = mut
+    self.pgle_profiler = pgle_profiler
 
   def _add_tokens_to_inputs(self, input_bufs):
     if self.ordered_effects:
@@ -1175,25 +1184,33 @@ class ExecuteReplicated:
     if self.mut:
       args = [*args, *self.mut.in_mut]
     input_bufs = self.in_handler(args)
-    if (self.ordered_effects or self.has_unordered_effects
-        or self.has_host_callbacks):
-      input_bufs = self._add_tokens_to_inputs(input_bufs)
-      results = self.xla_executable.execute_sharded(
-          input_bufs, with_tokens=True
-      )
-      result_token_bufs = results.disassemble_prefix_into_single_device_arrays(
-          len(self.ordered_effects))
-      sharded_runtime_token = results.consume_token()
-      self._handle_token_bufs(result_token_bufs, sharded_runtime_token)
-    else:
-      results = self.xla_executable.execute_sharded(input_bufs)
-    if dispatch.needs_check_special():
-      out_arrays = results.disassemble_into_single_device_arrays()
-      for arrays in out_arrays:
-        dispatch.check_special(self.name, arrays)
-      out = self.out_handler(out_arrays)
-    else:
-      out = results.consume_with_handlers(self.out_handler.handlers)
+    with profiler.PGLEProfiler.trace(self.pgle_profiler):
+      if (self.ordered_effects or self.has_unordered_effects
+          or self.has_host_callbacks):
+        input_bufs = self._add_tokens_to_inputs(input_bufs)
+        results = self.xla_executable.execute_sharded(
+            input_bufs, with_tokens=True
+        )
+
+        result_token_bufs = results.disassemble_prefix_into_single_device_arrays(
+            len(self.ordered_effects))
+        sharded_runtime_token = results.consume_token()
+        self._handle_token_bufs(result_token_bufs, sharded_runtime_token)
+      else:
+        results = self.xla_executable.execute_sharded(input_bufs)
+
+      if dispatch.needs_check_special():
+        out_arrays = results.disassemble_into_single_device_arrays()
+        for arrays in out_arrays:
+          dispatch.check_special(self.name, arrays)
+        out = self.out_handler(out_arrays)
+      else:
+        out = results.consume_with_handlers(self.out_handler.handlers)
+
+      if (self.pgle_profiler is not None and self.pgle_profiler.is_running()
+          and len(out) > 0):
+        out[0].block_until_ready()
+
     if self.mut is None:
       return out
     else:
@@ -1941,7 +1958,6 @@ def _cached_lowering_to_hlo(closed_jaxpr, api_name, fun_name, backend,
         "The following ordered effects are not supported for "
         f"more than 1 device: {unsupported_effects}")
   ordered_effects = list(effects.ordered_effects.filter_in(closed_jaxpr.effects))
-
   with dispatch.log_elapsed_time(
         "Finished jaxpr to MLIR module conversion {fun_name} in {elapsed_time} sec",
         fun_name=str(name_stack), event=dispatch.JAXPR_TO_MLIR_MODULE_EVENT):
@@ -2097,7 +2113,8 @@ def lower_sharding_computation(
     keep_unused: bool,
     inline: bool,
     devices_from_context: Sequence[xc.Device] | None = None,
-    lowering_parameters: mlir.LoweringParameters
+    lowering_parameters: mlir.LoweringParameters,
+    pgle_profiler: profiler.PGLEProfiler | None = None,
 ) -> MeshComputation:
   """Lowers a computation to XLA. It can take arbitrary shardings as input.
 
@@ -2141,6 +2158,7 @@ def lower_sharding_computation(
            for js, source_info in util.stable_unique(jaxpr_sharding))),
       devices_from_context)
 
+  platforms = lowering_parameters.platforms or (backend.platform,)
   # TODO(yashkatariya): Enable this when offload APIs are stable.
   # transfer_mem_kind_in_jaxpr = list(jaxpr_transfer_mem_kinds(jaxpr))
 
@@ -2190,6 +2208,7 @@ def lower_sharding_computation(
       str(name_stack),
       module,
       donated_invars,
+      platforms,
       global_in_avals=global_in_avals,
       global_out_avals=global_out_avals,
       in_shardings=in_shardings,
@@ -2211,7 +2230,8 @@ def lower_sharding_computation(
       pmap_nreps=nreps,
       shape_poly_state=shape_poly_state,
       all_default_mem_kind=all_default_mem_kind,
-      all_args_info=all_args_info)
+      all_args_info=all_args_info,
+      pgle_profiler=pgle_profiler)
 
 
 def _to_logical_sharding(
@@ -2244,6 +2264,7 @@ def lower_mesh_computation(
     lowering_parameters: mlir.LoweringParameters) -> MeshComputation:
   assert not mesh.empty
   backend = xb.get_device_backend(mesh.devices.flat[0])
+  platforms = lowering_parameters.platforms or (backend.platform,)
   name_stack = source_info_util.new_name_stack(wrap_name(fun_name, api_name))
 
   global_axis_sizes = mesh.shape
@@ -2352,7 +2373,7 @@ def lower_mesh_computation(
           closed_jaxpr,
           ordered_effects=ordered_effects,
           backend_or_name=backend,
-          platforms=lowering_parameters.platforms or (backend.platform,),
+          platforms=platforms,
           axis_context=axis_ctx,
           name_stack=name_stack,
           donated_args=donated_invars,
@@ -2369,6 +2390,7 @@ def lower_mesh_computation(
       str(name_stack),
       lowering_result.module,
       donated_invars,
+      platforms,
       global_in_avals=global_in_avals,
       global_out_avals=global_out_avals,
       in_shardings=in_shardings,
@@ -2387,17 +2409,20 @@ def lower_mesh_computation(
       in_layouts=(None,) * len(global_in_avals),
       out_layouts=(None,) * len(global_out_avals),
       shape_poly_state=lowering_result.shape_poly_state,
-      all_args_info=None)
+      all_args_info=None,
+      pgle_profiler=None)
 
 class MeshComputation(stages.XlaLowering):
   _hlo: ir.Module
   _executable: MeshExecutable | None
 
   def __init__(self, name: str, hlo: ir.Module,
-               donated_invars: Sequence[bool], **compile_args):
+               donated_invars: Sequence[bool], platforms: Sequence[str],
+               **compile_args):
     self._name = name
     self._hlo = hlo
     self._donated_invars = donated_invars
+    self._platforms = platforms
     self.compile_args = compile_args
     self._executable = None
 
@@ -2662,38 +2687,23 @@ def get_logical_mesh_ids(mesh_shape):
   return np.arange(math.prod(mesh_shape)).reshape(mesh_shape)
 
 
-@weakref_lru_cache
-def _cached_compilation(computation, name, mesh, spmd_lowering,
-                        tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
-                        allow_prop_to_outputs, host_callbacks, backend,
-                        da, pmap_nreps, compiler_options_keys,
-                        compiler_options_values):
-  # TODO(phawkins): One would normally just write:
-  # dev = np.array(device_assignment)
-  # The formulation below is substantially faster if there are many devices.
-  # If we were to optimize __getattr__ on xc.Device we might not need this
-  # workaround.
-  dev = np.vectorize(lambda i: da[i], otypes=[object])(
-    np.arange(len(da))
-  )
+def create_compile_options(
+    computation, mesh, spmd_lowering, tuple_args, auto_spmd_lowering,
+    allow_prop_to_inputs, allow_prop_to_outputs, backend,
+    np_dev, pmap_nreps, compiler_options):
   if pmap_nreps > 1:
     num_replicas, num_partitions = pmap_nreps, 1
   elif spmd_lowering:
-    num_replicas, num_partitions = 1, dev.size
+    num_replicas, num_partitions = 1, np_dev.size
   else:
-    num_replicas, num_partitions = dev.size, 1
+    num_replicas, num_partitions = np_dev.size, 1
 
   if pmap_nreps > 1:
     # In `jit` device_assignment is set to None when num_replicas > 1. Do
     # the same thing here too.
     xla_device_assignment = None
   else:
-    xla_device_assignment = dev.reshape((num_replicas, num_partitions))
-
-  if compiler_options_keys is None:
-    compiler_options = None
-  else:
-    compiler_options = dict(safe_zip(compiler_options_keys, compiler_options_values))
+    xla_device_assignment = np_dev.reshape((num_replicas, num_partitions))
 
   fdo_profile = (None if compiler_options is None else
                  compiler_options.pop("fdo_profile", None))
@@ -2720,12 +2730,36 @@ def _cached_compilation(computation, name, mesh, spmd_lowering,
   compile_options.parameter_is_tupled_arguments = tuple_args
   opts.allow_spmd_sharding_propagation_to_parameters = list(allow_prop_to_inputs)
   opts.allow_spmd_sharding_propagation_to_output = list(allow_prop_to_outputs)
+  return compile_options
+
+
+@weakref_lru_cache
+def _cached_compilation(computation, name, mesh, spmd_lowering,
+                        tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
+                        allow_prop_to_outputs, host_callbacks, backend,
+                        da, pmap_nreps, compiler_options_keys,
+                        compiler_options_values,
+                        pgle_profiler):
+  # One would normally just write: dev = np.array(device_assignment)
+  # The formulation below is substantially faster if there are many devices.
+  dev = np.vectorize(lambda i: da[i], otypes=[object])(np.arange(len(da)))
+
+  if compiler_options_keys is None:
+    compiler_options = None
+  else:
+    compiler_options = dict(safe_zip(compiler_options_keys, compiler_options_values))
+
+  compile_options = create_compile_options(
+      computation, mesh, spmd_lowering, tuple_args, auto_spmd_lowering,
+      allow_prop_to_inputs, allow_prop_to_outputs, backend,
+      dev, pmap_nreps, compiler_options)
 
   with dispatch.log_elapsed_time(
       "Finished XLA compilation of {fun_name} in {elapsed_time} sec",
       fun_name=name, event=dispatch.BACKEND_COMPILE_EVENT):
     xla_executable = compiler.compile_or_get_cached(
-        backend, computation, dev, compile_options, host_callbacks)
+        backend, computation, dev, compile_options, host_callbacks,
+        pgle_profiler)
   return xla_executable
 
 
@@ -2834,6 +2868,7 @@ class UnloadedMeshExecutable:
   in_layouts: Sequence[DeviceLocalLayout | None]
   out_layouts: Sequence[DeviceLocalLayout | None]
   all_args_info: AllArgsInfo | None
+  pgle_profiler: profiler.PGLEProfiler | None
 
   def build_unsafe_call(self):
     handle_args = InputsHandler(self.input_shardings)
@@ -2843,7 +2878,8 @@ class UnloadedMeshExecutable:
     unsafe_call = ExecuteReplicated(
         self.xla_executable, self.name, self.backend, handle_args,
         handle_outs, self.unordered_effects, self.ordered_effects, self.keepalive,
-        bool(self.host_callbacks), self.kept_var_idx, self.mut)
+        bool(self.host_callbacks), self.kept_var_idx, self.mut,
+        self.pgle_profiler)
     return unsafe_call
 
   def load(self) -> MeshExecutable:
@@ -2881,6 +2917,7 @@ class UnloadedMeshExecutable:
                all_default_mem_kind: bool = True,
                all_args_info: AllArgsInfo | None = None,
                compiler_options=None,
+               pgle_profiler: profiler.PGLEProfiler | None = None
   ) -> MeshExecutable:
     if shape_poly_state is not None and shape_poly_state.uses_dim_vars:
       hlo = mlir.refine_polymorphic_shapes(hlo)
@@ -2910,7 +2947,7 @@ class UnloadedMeshExecutable:
         hlo, name, mesh, spmd_lowering,
         tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
         allow_prop_to_outputs, tuple(host_callbacks), backend, da, pmap_nreps,
-        compiler_options_keys, compiler_options_values)
+        compiler_options_keys, compiler_options_values, pgle_profiler)
 
     if auto_spmd_lowering:
       assert mesh is not None
@@ -2960,7 +2997,8 @@ class UnloadedMeshExecutable:
         auto_spmd_lowering=auto_spmd_lowering,
         in_layouts=in_layouts,
         out_layouts=out_layouts,
-        all_args_info=all_args_info).load()
+        all_args_info=all_args_info,
+        pgle_profiler=pgle_profiler).load()
 
 
 class MeshExecutableFastpathData(NamedTuple):
@@ -3088,7 +3126,10 @@ class MeshExecutable(stages.XlaExecutable):
             self.unsafe_call.in_handler.input_indices)
       else:
         fastpath_data = None
-      return outs, fastpath_data
+      if xla_extension_version > 267:
+        return outs, fastpath_data, False  # Do not remove cache entry
+      else:
+        return outs, fastpath_data
 
     return xc._xla.pjit(
         self.unsafe_call.name, None, aot_cache_miss, [], [], [],

@@ -5517,17 +5517,57 @@ def argsort(
   return lax.rev(indices, dimensions=[dimension]) if descending else indices
 
 
-@util.implements(np.partition, lax_description="""
-The JAX version requires the ``kth`` argument to be a static integer rather than
-a general array. This is implemented via two calls to :func:`jax.lax.top_k`. If
-you're only accessing the top or bottom k values of the output, it may be more
-efficient to call :func:`jax.lax.top_k` directly.
-
-The JAX version differs from the NumPy version in the treatment of NaN entries;
-NaNs which have the negative bit set are sorted to the beginning of the array.
-""")
 @partial(jit, static_argnames=['kth', 'axis'])
 def partition(a: ArrayLike, kth: int, axis: int = -1) -> Array:
+  """Returns a partially-sorted copy of an array.
+
+  JAX implementation of :func:`numpy.partition`. The JAX version differs from
+  NumPy in the treatment of NaN entries: NaNs which have the negative bit set
+  are sorted to the beginning of the array.
+
+  Args:
+    a: array to be partitioned.
+    kth: static integer index about which to partition the array.
+    axis: static integer axis along which to partition the array; default is -1.
+
+  Returns:
+    A copy of ``a`` partitioned at the ``kth`` value along ``axis``. The entries
+    before ``kth`` are values smaller than ``take(a, kth, axis)``, and entries
+    after ``kth`` are indices of values larger than ``take(a, kth, axis)``
+
+  Note:
+    The JAX version requires the ``kth`` argument to be a static integer rather than
+    a general array. This is implemented via two calls to :func:`jax.lax.top_k`. If
+    you're only accessing the top or bottom k values of the output, it may be more
+    efficient to call :func:`jax.lax.top_k` directly.
+
+  See Also:
+    - :func:`jax.numpy.sort`: full sort
+    - :func:`jax.numpy.argpartition`: indirect partial sort
+    - :func:`jax.lax.top_k`: directly find the top k entries
+    - :func:`jax.lax.approx_max_k`: compute the approximate top k entries
+    - :func:`jax.lax.approx_min_k`: compute the approximate bottom k entries
+
+  Examples:
+    >>> x = jnp.array([6, 8, 4, 3, 1, 9, 7, 5, 2, 3])
+    >>> kth = 4
+    >>> x_partitioned = jnp.partition(x, kth)
+    >>> x_partitioned
+    Array([1, 2, 3, 3, 4, 9, 8, 7, 6, 5], dtype=int32)
+
+    The result is a partially-sorted copy of the input. All values before ``kth``
+    are of smaller than the pivot value, and all values after ``kth`` are larger
+    than the pivot value:
+
+    >>> smallest_values = x_partitioned[:kth]
+    >>> pivot_value = x_partitioned[kth]
+    >>> largest_values = x_partitioned[kth + 1:]
+    >>> print(smallest_values, pivot_value, largest_values)
+    [1 2 3 3] 4 [9 8 7 6 5]
+
+    Notice that among ``smallest_values`` and ``largest_values``, the returned
+    order is arbitrary and implementation-dependent.
+  """
   # TODO(jakevdp): handle NaN values like numpy.
   util.check_arraylike("partition", a)
   arr = asarray(a)
@@ -5543,17 +5583,58 @@ def partition(a: ArrayLike, kth: int, axis: int = -1) -> Array:
   return swapaxes(out, -1, axis)
 
 
-@util.implements(np.argpartition, lax_description="""
-The JAX version requires the ``kth`` argument to be a static integer rather than
-a general array. This is implemented via two calls to :func:`jax.lax.top_k`. If
-you're only accessing the top or bottom k values of the output, it may be more
-efficient to call :func:`jax.lax.top_k` directly.
-
-The JAX version differs from the NumPy version in the treatment of NaN entries;
-NaNs which have the negative bit set are sorted to the beginning of the array.
-""")
 @partial(jit, static_argnames=['kth', 'axis'])
 def argpartition(a: ArrayLike, kth: int, axis: int = -1) -> Array:
+  """Returns indices that partially sort an array.
+
+  JAX implementation of :func:`numpy.argpartition`. The JAX version differs from
+  NumPy in the treatment of NaN entries: NaNs which have the negative bit set are
+  sorted to the beginning of the array.
+
+  Args:
+    a: array to be partitioned.
+    kth: static integer index about which to partition the array.
+    axis: static integer axis along which to partition the array; default is -1.
+
+  Returns:
+    Indices which partition ``a`` at the ``kth`` value along ``axis``. The entries
+    before ``kth`` are indices of values smaller than ``take(a, kth, axis)``, and
+    entries after ``kth`` are indices of values larger than ``take(a, kth, axis)``
+
+  Note:
+    The JAX version requires the ``kth`` argument to be a static integer rather than
+    a general array. This is implemented via two calls to :func:`jax.lax.top_k`. If
+    you're only accessing the top or bottom k values of the output, it may be more
+    efficient to call :func:`jax.lax.top_k` directly.
+
+  See Also:
+    - :func:`jax.numpy.partition`: direct partial sort
+    - :func:`jax.numpy.argsort`: full indirect sort
+    - :func:`jax.lax.top_k`: directly find the top k entries
+    - :func:`jax.lax.approx_max_k`: compute the approximate top k entries
+    - :func:`jax.lax.approx_min_k`: compute the approximate bottom k entries
+
+  Examples:
+    >>> x = jnp.array([6, 8, 4, 3, 1, 9, 7, 5, 2, 3])
+    >>> kth = 4
+    >>> idx = jnp.argpartition(x, kth)
+    >>> idx
+    Array([4, 8, 3, 9, 2, 0, 1, 5, 6, 7], dtype=int32)
+
+    The result is a sequence of indices that partially sort the input. All indices
+    before ``kth`` are of values smaller than the pivot value, and all indices
+    after ``kth`` are of values larger than the pivot value:
+
+    >>> x_partitioned = x[idx]
+    >>> smallest_values = x_partitioned[:kth]
+    >>> pivot_value = x_partitioned[kth]
+    >>> largest_values = x_partitioned[kth + 1:]
+    >>> print(smallest_values, pivot_value, largest_values)
+    [1 2 3 3] 4 [6 8 9 7 5]
+
+    Notice that among ``smallest_values`` and ``largest_values``, the returned
+    order is arbitrary and implementation-dependent.
+  """
   # TODO(jakevdp): handle NaN values like numpy.
   util.check_arraylike("partition", a)
   arr = asarray(a)
@@ -7078,19 +7159,71 @@ def _searchsorted_via_compare_all(sorted_arr: Array, query: Array, side: str, dt
   return comparisons.sum(dtype=dtype, axis=0)
 
 
-@util.implements(np.searchsorted, skip_params=['sorter'],
-  extra_params=_dedent("""
-    method : str
-        One of 'scan' (default), 'scan_unrolled', 'sort' or 'compare_all'. Controls the method used by the
-        implementation: 'scan' tends to be more performant on CPU (particularly when ``a`` is
-        very large), 'scan_unrolled' is more performant on GPU at the expense of additional compile time,
-        'sort' is often more performant on accelerator backends like GPU and TPU
-        (particularly when ``v`` is very large), and 'compare_all' can be most performant
-        when ``a`` is very small."""))
-@partial(jit, static_argnames=('side', 'sorter', 'method'))
+@partial(jit, static_argnames=('side', 'method'))
 def searchsorted(a: ArrayLike, v: ArrayLike, side: str = 'left',
-                 sorter: None = None, *, method: str = 'scan') -> Array:
-  util.check_arraylike("searchsorted", a, v)
+                 sorter: ArrayLike | None = None, *, method: str = 'scan') -> Array:
+  """Perform a binary search within a sorted array.
+
+  JAX implementation of :func:`numpy.searchsorted`.
+
+  This will return the indices within a sorted array ``a`` where values in ``v``
+  can be inserted to maintain its sort order.
+
+  Args:
+    a: one-dimensional array, assumed to be in sorted order unless ``sorter`` is specified.
+    v: N-dimensional array of query values
+    side: ``'left'`` (default) or ``'right'``; specifies whether insertion indices will be
+      to the left or the right in case of ties.
+    sorter: optional array of indices specifying the sort order of ``a``. If specified,
+      then the algorithm assumes that ``a[sorter]`` is in sorted order.
+    method: one of ``'scan'`` (default), ``'scan_unrolled'``, ``'sort'`` or ``'compare_all'``.
+      See *Note* below.
+
+  Returns:
+    Array of insertion indices of shape ``v.shape``.
+
+  Note:
+    The ``method`` argument controls the algorithm used to compute the insertion indices.
+
+    - ``'scan'`` (the default) tends to be more performant on CPU, particularly when ``a`` is
+      very large.
+    - ``'scan_unrolled'`` is more performant on GPU at the expense of additional compile time.
+    - ``'sort'`` is often more performant on accelerator backends like GPU and TPU, particularly
+      when ``v`` is very large.
+    - ``'compare_all'`` tends to be the most performant when ``a`` is very small.
+
+  Examples:
+    Searching for a single value:
+
+    >>> a = jnp.array([1, 2, 2, 3, 4, 5, 5])
+    >>> jnp.searchsorted(a, 2)
+    Array(1, dtype=int32)
+    >>> jnp.searchsorted(a, 2, side='right')
+    Array(3, dtype=int32)
+
+    Searching for a batch of values:
+
+    >>> vals = jnp.array([0, 3, 8, 1.5, 2])
+    >>> jnp.searchsorted(a, vals)
+    Array([0, 3, 7, 1, 1], dtype=int32)
+
+    Optionally, the ``sorter`` argument can be used to find insertion indices into
+    an array sorted via :func:`jax.numpy.argsort`:
+
+    >>> a = jnp.array([4, 3, 5, 1, 2])
+    >>> sorter = jnp.argsort(a)
+    >>> jnp.searchsorted(a, vals, sorter=sorter)
+    Array([0, 2, 5, 1, 1], dtype=int32)
+
+    The result is equivalent to passing the sorted array:
+
+    >>> jnp.searchsorted(jnp.sort(a), vals)
+    Array([0, 2, 5, 1, 1], dtype=int32)
+  """
+  if sorter is None:
+    util.check_arraylike("searchsorted", a, v)
+  else:
+    util.check_arraylike("searchsorted", a, v, sorter)
   if side not in ['left', 'right']:
     raise ValueError(f"{side!r} is an invalid value for keyword 'side'. "
                      "Expected one of ['left', 'right'].")
@@ -7098,11 +7231,11 @@ def searchsorted(a: ArrayLike, v: ArrayLike, side: str = 'left',
     raise ValueError(
         f"{method!r} is an invalid value for keyword 'method'. "
         "Expected one of ['sort', 'scan', 'scan_unrolled', 'compare_all'].")
-  if sorter is not None:
-    raise NotImplementedError("sorter is not implemented")
   if ndim(a) != 1:
     raise ValueError("a should be 1-dimensional")
   a, v = util.promote_dtypes(a, v)
+  if sorter is not None:
+    a = a[sorter]
   dtype = int32 if len(a) <= np.iinfo(np.int32).max else int64
   if len(a) == 0:
     return zeros_like(v, dtype=dtype)

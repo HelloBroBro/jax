@@ -314,12 +314,20 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
 
 def _set_states(attrs_tracked, vals):
   from jax.experimental.attrs import jax_setattr
-  for ((obj, attr), val) in zip(attrs_tracked, vals):
+  valss = split_list_checked(vals, [td.num_leaves for _, td, _ in attrs_tracked])
+  for ((_, treedef, (obj, attr)), leaves) in zip(attrs_tracked, valss):
+    val = tree_unflatten(treedef, leaves)
     jax_setattr(obj, attr, val)
 
 def _get_states(attrs_tracked):
   from jax.experimental.attrs import jax_getattr
-  return [jax_getattr(obj, attr) for (obj, attr) in attrs_tracked]
+  vals = []
+  for treedef, _, (obj, attr) in attrs_tracked:
+    tree = jax_getattr(obj, attr)
+    leaves, treedef_ = tree_flatten(tree)
+    assert treedef == treedef_
+    vals.extend(leaves)
+  return vals
 
 def _check_scan_carry_type(body_fun, in_carry, out_carry_tree, out_avals):
   try:
@@ -2365,6 +2373,8 @@ def _cumulative_reduction_primitive(name, reduce_fn, reduce_window_fn):
         platform=platform)
 
   if xla_extension_version >= 266:
+    # For jax-metal, until reduce_window legalization is better supported.
+    register_lowering(partial(associative_scan, reduce_fn), 'METAL')
     # In XLA, there's a rewriter for an O(N^2) reduce-window implementation.
     register_lowering(
         partial(cumred_reduce_window_impl, reduce_window_fn)

@@ -33,7 +33,8 @@ from jax._src.lib import xla_client as xc
 from jax._src.util import safe_zip
 from jax._src.sharding_impls import (_op_sharding_to_pos_sharding,
                                      pmap_sharding_devices_indices_map,
-                                     NamedSharding, GSPMDSharding)
+                                     NamedSharding, GSPMDSharding,
+                                     PositionalSharding)
 from jax.experimental.pjit import pjit
 from jax.experimental import multihost_utils
 from jax.sharding import PartitionSpec as P
@@ -922,7 +923,7 @@ class ShardingTest(jtu.JaxTestCase):
         r"Sharding NamedSharding\(mesh=Mesh\('replica': 1, 'data': 1, 'mdl': 2\), "
         r"spec=PartitionSpec\(None, \('mdl',\), None, None\).*\) is only "
         "valid for values of rank at least 4, but was applied to a value of rank 2"):
-      new_mps.is_compatible_aval(shape)
+      new_mps.check_compatible_aval(shape)
 
   def test_is_subclass(self):
     # array version of api_test.py::APITest::test_is_subclass
@@ -975,6 +976,15 @@ class ShardingTest(jtu.JaxTestCase):
     self.assertEqual(mps.shard_shape(value_shape),
                      devices_sharding.shard_shape(value_shape))
     self.assertTrue(op_shardings.are_op_shardings_equal(op1, op2))
+
+  def test_positional_sharding_aval_compatible(self):
+    sharding = PositionalSharding(jax.devices()).reshape(1, jax.device_count())
+    x = jax.random.uniform(jax.random.key(42), (256, 20, 1000))
+    with self.assertRaisesRegex(
+        ValueError,
+        'Sharding PositionalSharding.*is only valid for values of rank 2, but'
+        ' was applied to a value of rank 3'):
+      jax.lax.with_sharding_constraint(x, sharding)
 
   @parameterized.named_parameters(
       ("2d_mesh_x_y",              (4, 2), P("x", "y")),
@@ -1178,7 +1188,7 @@ class ShardingTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError,
         r"For scalars the PartitionSpec should be P()"):
-      s.is_compatible_aval(shape)
+      s.check_compatible_aval(shape)
 
   def test_mesh_caching_during_construction(self):
     if jax.device_count() < 2:
