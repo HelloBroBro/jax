@@ -1356,11 +1356,21 @@ def _resolve_in_layouts(args, jit_in_layouts, resolved_in_shardings, in_avals):
       # `Layout(None, sharding)`
       if (committed and not is_pmap_sharding and
           arg_layout is not None and arg_layout != jit_in_l):
+        extra_msg = ''
+        if isinstance(jit_in_l, AutoLayout):
+          extra_msg = (
+              ' The layout given to `jax.jit` is `DeviceLocalLayout.AUTO` but'
+              ' the corresponding argument passed is a `jax.Array` with a'
+              ' concrete layout. Consider passing a `jax.ShapeDtypeStruct`'
+              ' instead of `jax.Array` as an argument to the jitted function '
+              ' when using `DeviceLocalLayout.AUTO`.'
+          )
         raise ValueError('Layout passed to jit does not match the layout '
                           'on the respective arg. '
                           f'Got pjit layout: {jit_in_l},\n'
                           f'arg layout: {arg_layout} for '
-                          f'arg shape: {shaped_abstractify(arg).str_short()}')
+                          f'arg shape: {shaped_abstractify(arg).str_short()}.'
+                          f'{extra_msg}')
       resolved_in_layouts.append(jit_in_l)
   return tuple(resolved_in_layouts)
 
@@ -2458,18 +2468,35 @@ mlir.register_lowering(sharding_constraint_p,
 def _sharding_constraint_batcher(insert_axis, spmd_axis_name, axis_size,
                                  axis_name, main_type, vals_in, dims_in,
                                  sharding, resource_env, unconstrained_dims):
+  if spmd_axis_name is not None and isinstance(sharding, NamedSharding):
+    used = {n for ns in sharding.spec
+            for n in (ns if isinstance(ns, tuple) else (ns,))}
+    if set(spmd_axis_name) & used:
+      raise ValueError(f"vmap spmd_axis_name {spmd_axis_name} cannot appear in "
+                       "with_sharding_constraint spec, but got spec "
+                       f"{sharding.spec}")
   x, = vals_in
   d, = dims_in
   # None means unconstrained in ParsedPartitionSpec
   new_parts = (axis_name,) if insert_axis else (
       None if spmd_axis_name is None else spmd_axis_name)
   unconstrained_dims = {ud + (d <= ud) for ud in unconstrained_dims}
+
   if new_parts is None:
     unconstrained_dims.add(d)
+
+  vmapped_sharding = _pjit_batcher_for_sharding(
+      sharding, d, new_parts, resource_env.physical_mesh, x.ndim)
+  if unconstrained_dims and isinstance(vmapped_sharding, NamedSharding):
+    new_spec = list(vmapped_sharding.spec) + [None] * (x.ndim - len(vmapped_sharding.spec))
+    for u in unconstrained_dims:
+      new_spec[u] = PartitionSpec.UNCONSTRAINED
+    vmapped_sharding = NamedSharding(
+        vmapped_sharding.mesh, PartitionSpec(*new_spec))
+
   y = sharding_constraint_p.bind(
       x,
-      sharding=_pjit_batcher_for_sharding(
-          sharding, d, new_parts, resource_env.physical_mesh, x.ndim),
+      sharding=vmapped_sharding,
       resource_env=resource_env,
       unconstrained_dims=unconstrained_dims)
   return y, d

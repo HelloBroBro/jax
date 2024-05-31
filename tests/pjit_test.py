@@ -1303,6 +1303,16 @@ class PJitTest(jtu.BufferDonationTestCase):
             """).strip(),
     )
 
+  def test_with_sharding_constraint_vmap_spmd_axis_name_error(self):
+    mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
+
+    def f(x):
+      return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P('x')))
+
+    xs = jnp.arange(4 * 16.).reshape(4, 16)
+    with self.assertRaisesRegex(ValueError, "spmd_axis_name"):
+      jax.vmap(f, spmd_axis_name='x')(xs)
+
 
 @jtu.pytest_mark_if_available('multiaccelerator')
 class CustomPartitionerTest(jtu.JaxTestCase):
@@ -4137,6 +4147,40 @@ class ArrayPjitTest(jtu.JaxTestCase):
       self.assertNotEqual(f(1), g(1))
       self.assertEqual(g(1), h(1))
 
+  def test_wsc_vmap_unconstrained_spmd_axis_name(self):
+    def get_wsc_eqn_sharding(jaxpr):
+      for eqn in jaxpr.eqns:
+        if str(eqn.primitive) == 'sharding_constraint':
+          return eqn.params['sharding'], eqn.params['unconstrained_dims']
+      for s in core.subjaxprs(jaxpr):
+        return get_wsc_eqn_sharding(s)
+
+    mesh = jtu.create_global_mesh((2, 1), ('x', 'y'))
+    inp = jnp.ones((10, 10))
+
+    def a_function(x):
+      return with_sharding_constraint(x, NamedSharding(mesh, P(P.UNCONSTRAINED)))
+
+    def vmap_the_function_spmd(y):
+      return jax.vmap(a_function, spmd_axis_name='x')(y)
+
+    f1 = jax.jit(vmap_the_function_spmd)
+    f1(inp)  # doesn't crash
+    jaxpr1 = jax.make_jaxpr(f1)(inp)
+    s1, u1 = get_wsc_eqn_sharding(jaxpr1)
+    self.assertEqual(s1.spec, P('x', P.UNCONSTRAINED))
+    self.assertEqual(u1, {1})
+
+    def vmap_the_function_no_spmd(y):
+      return jax.vmap(a_function)(y)
+
+    f2 = jax.jit(vmap_the_function_no_spmd)
+    f2(inp)  # doesn't crash
+    jaxpr2 = jax.make_jaxpr(f2)(inp)
+    s2, u2 = get_wsc_eqn_sharding(jaxpr2)
+    self.assertEqual(s2.spec, P(P.UNCONSTRAINED, P.UNCONSTRAINED))
+    self.assertEqual(u2, {0, 1})
+
 
 class TempSharding(Sharding):
 
@@ -4270,8 +4314,7 @@ class PJitErrorTest(jtu.JaxTestCase):
         r".*rank at least 2, but was applied to a value of rank 1", re.M | re.S)
     with self.assertRaisesRegex(ValueError, error):
       pjit(
-          lambda x: with_sharding_constraint(x, spec),
-          in_shardings=None,
+          lambda x: with_sharding_constraint(x, spec), in_shardings=None,
           out_shardings=None,
       )(x)
 
