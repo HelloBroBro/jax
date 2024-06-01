@@ -1545,11 +1545,11 @@ def manual_proto(
   tad_shape.append(math.prod([named_mesh_shape[a] for a in replicated_axes]))
   tad_shape.append(math.prod([named_mesh_shape[a] for a in manual_axes]))
 
-  raw_mesh = np.arange(math.prod(mesh_shape)).reshape(mesh_shape)
   proto = xc.OpSharding()
   proto.type = xc.OpSharding.Type.OTHER
   proto.tile_assignment_dimensions = tad_shape
-  proto.tile_assignment_devices = list(raw_mesh.transpose(tad_perm).reshape(tad_shape).flat)
+  proto.iota_reshape_dims = mesh_shape
+  proto.iota_transpose_perm = tad_perm
   proto.last_tile_dims = [xc.OpSharding.Type.REPLICATED, xc.OpSharding.Type.MANUAL]
   return proto
 
@@ -2023,8 +2023,8 @@ def are_all_shardings_default_mem_kind(da_object, shardings):
 memory_kind_propagate_rule: dict[Any, Any] = {}
 
 @weakref_lru_cache
-def get_out_memory_kinds_via_propagation(closed_jaxpr: core.ClosedJaxpr
-                                         ) -> tuple[None | str]:
+def get_out_memory_kinds_via_propagation(closed_jaxpr: core.ClosedJaxpr,
+                                         in_shardings=None) -> tuple[None | str]:
   env = {}  # type: ignore
   jaxpr = closed_jaxpr.jaxpr
 
@@ -2039,7 +2039,12 @@ def get_out_memory_kinds_via_propagation(closed_jaxpr: core.ClosedJaxpr
   def _default_rule(prim, num_outvars, *_, **__):
     return [None] * num_outvars if prim.multiple_results else None
 
-  safe_map(write, jaxpr.invars, [None] * len(jaxpr.invars))
+  if in_shardings is None:
+    invar_mem_kind = [None] * len(jaxpr.invars)
+  else:
+    invar_mem_kind = [None if is_unspecified_or_auto(s) else s.memory_kind
+                      for s in in_shardings]
+  safe_map(write, jaxpr.invars, invar_mem_kind)
   safe_map(write, jaxpr.constvars, [None] * len(jaxpr.constvars))
 
   for eqn in jaxpr.eqns:
@@ -2178,7 +2183,8 @@ def lower_sharding_computation(
   # TODO(yashkatariya): Remove this when XLA can propagate memory kinds or when
   # JAX puts memory kinds in the types of jaxpr.
   if not all_default_mem_kind:
-    propagated_out_mem_kinds = get_out_memory_kinds_via_propagation(closed_jaxpr)
+    propagated_out_mem_kinds = get_out_memory_kinds_via_propagation(
+        closed_jaxpr, in_shardings)
   else:
     propagated_out_mem_kinds = (None,) * len(global_out_avals)
 
