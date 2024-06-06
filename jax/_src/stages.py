@@ -72,7 +72,7 @@ class Executable(Protocol):
     # TODO(frostig): improve annotation (sequences of arrays/buffers)
     raise NotImplementedError
 
-  def input_shardings(self) -> Sequence[jax.sharding.XLACompatibleSharding]:
+  def input_shardings(self) -> Sequence[jax.sharding.Sharding]:
     """Flat sequence of input shardings.
 
     May raise ``NotImplementedError`` if unavailable, e.g. based on backend,
@@ -80,7 +80,7 @@ class Executable(Protocol):
     """
     raise NotImplementedError
 
-  def output_shardings(self) -> Sequence[jax.sharding.XLACompatibleSharding]:
+  def output_shardings(self) -> Sequence[jax.sharding.Sharding]:
     """Flat sequence of output shardings.
 
     May raise ``NotImplementedError`` if unavailable, e.g. based on backend,
@@ -218,11 +218,11 @@ class XlaExecutable(Executable):
   def call(self, *args_flat) -> Sequence[Any]:
     raise NotImplementedError("must override")
 
-  def input_shardings(self) -> Sequence[jax.sharding.XLACompatibleSharding]:
+  def input_shardings(self) -> Sequence[jax.sharding.Sharding]:
     raise NotImplementedError(
         "compiled executable carries no input sharding information")
 
-  def output_shardings(self) -> Sequence[jax.sharding.XLACompatibleSharding]:
+  def output_shardings(self) -> Sequence[jax.sharding.Sharding]:
     raise NotImplementedError(
         "compiled executable carries no output sharding information")
 
@@ -369,16 +369,25 @@ class XlaLowering(Lowering):
 
 # -- Public-facing API, plus helpers
 
-@dataclass
+@dataclass(frozen=True)
 class ArgInfo:
-  aval: core.AbstractValue
+  _aval: core.AbstractValue
   donated: bool
 
-@dataclass
+  @property
+  def shape(self):
+    return self._aval.shape  # pytype: disable=attribute-error
+
+  @property
+  def dtype(self):
+    return self._aval.dtype  # pytype: disable=attribute-error
+
+
+@dataclass(frozen=True)
 class OutInfo:
   shape: tuple[int, ...]
-  dtype: Any
-  sharding: jax.sharding.Sharding
+  dtype: jax.typing.DTypeLike
+  sharding: jax.sharding.Sharding | None = None
 
 
 class Stage:
@@ -392,7 +401,7 @@ class Stage:
   @property
   def in_avals(self):
     """Tree of input avals."""
-    return tree_util.tree_map(lambda x: x.aval, self.args_info)
+    return tree_util.tree_map(lambda x: x._aval, self.args_info)
 
   @property
   def donate_argnums(self):
@@ -414,6 +423,27 @@ class CompiledCallParams(NamedTuple):
   no_kwargs: bool
   in_tree: tree_util.PyTreeDef
   out_tree: tree_util.PyTreeDef
+
+
+class Specialized(Stage):
+  __slots__ = ["jaxpr", "args_info", "fun_name", "_out_tree", "_lower_callable"]
+
+  def __init__(self, jaxpr: core.ClosedJaxpr, args_info, fun_name, out_tree,
+               lower_callable):
+    self.jaxpr = jaxpr
+    self.args_info = args_info
+    self.fun_name = fun_name
+    self._out_tree = out_tree
+    self._lower_callable = lower_callable
+
+  @property
+  def out_info(self):
+    return self._out_tree.unflatten(
+        [OutInfo(o.shape, o.dtype) for o in self.jaxpr.out_avals])
+
+  def lower(self):
+    lowering = self._lower_callable()
+    return Lowered(lowering, self.args_info, self._out_tree)
 
 
 class Compiled(Stage):
@@ -503,7 +533,7 @@ class Compiled(Stage):
     return self._executable.runtime_executable()
 
   @property
-  def input_shardings(self):  # PyTree[sharding.XLACompatibleSharding]
+  def input_shardings(self):  # PyTree[sharding.Sharding]
     shardings_flat = self._executable.input_shardings()
     # Some input shardings got DCE'd
     if self.in_tree.num_leaves > len(shardings_flat):
@@ -513,7 +543,7 @@ class Compiled(Stage):
     return tree_util.tree_unflatten(self.in_tree, shardings_flat)  # pytype: disable=attribute-error
 
   @property
-  def output_shardings(self):  # PyTree[sharding.XLACompatibleSharding]
+  def output_shardings(self):  # PyTree[sharding.Sharding]
     shardings_flat = self._executable.output_shardings()
     return tree_util.tree_unflatten(self.out_tree, shardings_flat)  # pytype: disable=attribute-error
 

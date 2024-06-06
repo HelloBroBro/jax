@@ -33,7 +33,6 @@ import re
 import jax
 from jax.experimental import jax2tf
 from jax.experimental import export
-from jax.experimental.export import _shape_poly as shape_poly
 from jax.experimental import pjit
 from jax import lax
 import jax.numpy as jnp
@@ -43,6 +42,7 @@ from jax._src import config
 from jax._src import core
 from jax._src import test_util as jtu
 from jax._src import util
+from jax._src.export import shape_poly
 from jax._src.lax import lax as lax_internal
 from jax._src.lax import control_flow as lax_control_flow
 from jax._src.lib import xla_client
@@ -2815,17 +2815,8 @@ class ShapePolyPrimitivesTest(tf_test_util.JaxToTfTestCase):
     if harness.group_name == "eig" and not jtu.test_device_matches(["cpu"]):
       raise unittest.SkipTest("JAX implements eig only on CPU.")
 
-    prev_jax_config_flags = {
-      fname: getattr(jax.config, fname)
-      for fname, fvalue in harness.override_jax_config_flags.items()
-    }
-    try:
-      for fname, fvalue in harness.override_jax_config_flags.items():
-        jax.config.update(fname, fvalue)
+    with jtu.global_config_context(**harness.override_jax_config_flags):
       harness.run_test(self)
-    finally:
-      for fname, _ in harness.override_jax_config_flags.items():
-        jax.config.update(fname, prev_jax_config_flags[fname])
 
 
 if __name__ == "__main__":

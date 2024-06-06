@@ -32,9 +32,9 @@ from jax._src import util
 from jax._src import xla_bridge
 from jax._src import core
 from jax._src.lib import xla_client as xc
-from jax._src.op_shardings import ( are_op_shardings_equal, get_num_ways_dim_sharded,
-    is_op_sharding_replicated,
-    op_sharding_to_indices)  # pyformat: disable
+from jax._src.lib import xla_extension_version
+from jax._src.op_shardings import (
+    are_op_shardings_equal, get_num_ways_dim_sharded, is_op_sharding_replicated)
 from jax._src.partition_spec import PartitionSpec
 from jax._src.util import safe_map, safe_zip, use_cpp_class, use_cpp_method
 import numpy as np
@@ -44,94 +44,12 @@ Shape = tuple[int, ...]
 Device = xc.Device
 Index = tuple[slice, ...]
 XLADeviceAssignment = tuple[Device, ...]
-
+# TODO(yashkatariya): Remove this after 3 months of deprecation.
+XLACompatibleSharding = sharding.Sharding
 
 @dataclasses.dataclass(frozen=True)
 class TransferToMemoryKind:
   memory_kind: str
-
-
-@functools.lru_cache(maxsize=4096)
-def common_devices_indices_map(s, global_shape: Shape) -> Mapping[Device, Index]:
-  hlo_sharding = s._to_xla_hlo_sharding(len(global_shape))
-  gspmd_sharding = GSPMDSharding(s._device_assignment, hlo_sharding)
-  return gspmd_sharding.devices_indices_map(global_shape)
-
-
-@functools.lru_cache(maxsize=4096)
-def _common_shard_shape(self, global_shape: Shape) -> Shape:
-  hlo_sharding = self._to_xla_hlo_sharding(len(global_shape))
-  if is_op_sharding_replicated(hlo_sharding):
-    return global_shape
-  partitions, _ = get_num_ways_dim_sharded(hlo_sharding)
-  assert len(partitions) == len(global_shape), (len(partitions), len(global_shape))
-  out = []
-  for dim, (s, p) in enumerate(safe_zip(global_shape, partitions)):
-    try:
-      quotient, remainder = divmod(s, p)
-    except TypeError:
-      # TODO Figure out how to partition dynamic shapes
-      raise NotImplementedError
-    if remainder != 0:
-      raise ValueError(
-          f"Sharding {self} implies that array axis {dim} is partitioned "
-          f"{p} times, but the dimension size is {s} "
-          f"(full shape: {global_shape}, "
-          f"per-dimension tiling factors: {partitions} should evenly divide "
-          "the shape)")
-    out.append(quotient)
-  return tuple(out)
-
-
-# Shardings that inherit from XLACompatibleSharding should implement the
-# `_device_assignment` property and `_to_xla_hlo_sharding` method.
-@use_cpp_class(xc.XLACompatibleSharding)
-class XLACompatibleSharding(sharding.Sharding):
-  """A :class:`Sharding` that describes shardings expressible to XLA.
-
-  Subclasses of :class:`XLACompatibleSharding` work with
-  all JAX APIs and transformations that use XLA.
-  """
-
-  # Abstract methods below that subclasses should implement.
-
-  @property
-  def _device_assignment(self) -> XLADeviceAssignment:
-    raise NotImplementedError('Subclasses should implement this method.')
-
-  def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
-    raise NotImplementedError('Subclasses should implement this method.')
-
-  #############################################################################
-  # Default implementations below that all subclasses will inherit.
-
-  def devices_indices_map(self, global_shape: Shape) -> Mapping[Device, Index]:
-    return common_devices_indices_map(self, global_shape)
-
-  @functools.cached_property
-  def _addressable_device_assignment(self) -> XLADeviceAssignment:
-    if self.is_fully_addressable:
-      return self._device_assignment
-    if hasattr(self, '_internal_device_list'):
-      return tuple(self._internal_device_list.addressable_device_list)
-    return tuple(d for d in self._device_assignment
-                 if d.process_index == d.client.process_index())
-
-  def shard_shape(self, global_shape: Shape) -> Shape:
-    return _common_shard_shape(self, global_shape)
-
-  def is_equivalent_to(self: XLACompatibleSharding,  # type: ignore
-                       other: XLACompatibleSharding, ndim: int) -> bool:
-    try:
-      return (are_op_shardings_equal(self._to_xla_hlo_sharding(ndim),
-                                      other._to_xla_hlo_sharding(ndim))
-              and self._internal_device_list == other._internal_device_list and  # type: ignore
-              self.memory_kind == other.memory_kind)
-    # NotImplementedError is raised by PmapSharding because it can't lower
-    # to OpSharding. So if `other` is a PmapSharding, default to a strict
-    # equality check.
-    except NotImplementedError:
-      return self == other
 
 
 @functools.lru_cache
@@ -240,7 +158,7 @@ def named_sharding_to_xla_hlo_sharding(
 
 
 @use_cpp_class(xc.NamedSharding)
-class NamedSharding(XLACompatibleSharding):
+class NamedSharding(sharding.Sharding):
   r"""A :class:`NamedSharding` expresses sharding using named axes.
 
   A :class:`NamedSharding` is a pair of a :class:`Mesh` of devices and
@@ -385,7 +303,7 @@ def get_replicated_hlo_sharding():
 
 
 @use_cpp_class(xc.SingleDeviceSharding)
-class SingleDeviceSharding(XLACompatibleSharding):
+class SingleDeviceSharding(sharding.Sharding):
   """A :class:`Sharding` that places its data on a single device.
 
   Args:
@@ -464,7 +382,7 @@ def pmap_sharding_devices_indices_map(
 
 
 @use_cpp_class(xc.PmapSharding)
-class PmapSharding(XLACompatibleSharding):
+class PmapSharding(sharding.Sharding):
   """Describes a sharding used by :func:`jax.pmap`."""
   devices: np.ndarray
   sharding_spec: sharding_specs.ShardingSpec
@@ -665,7 +583,7 @@ def _positional_sharding_to_xla_hlo_sharding(
   return xc.HloSharding.from_proto(pbuf)
 
 
-class PositionalSharding(XLACompatibleSharding):
+class PositionalSharding(sharding.Sharding):
   _devices: tuple[xc.Device, ...]
   _memory_kind: str | None
   _ids: np.ndarray  # dtype DeviceIdSet
@@ -772,7 +690,7 @@ class PositionalSharding(XLACompatibleSharding):
   def is_fully_replicated(self) -> bool:
     return self.shape == (1,) * self.ndim
 
-  # XLACompatibleSharding interface
+  # sharding.Sharding interface
 
   @property
   def _device_assignment(self) -> XLADeviceAssignment:
@@ -815,17 +733,8 @@ class DeviceIdSet:
             self._ids == other._ids)
 
 
-@functools.lru_cache(maxsize=4096)
-def gspmd_sharding_devices_indices_map(
-    self, global_shape: Shape) -> Mapping[Device, Index]:
-  self.shard_shape(global_shape)  # raises a good error message
-  indices = op_sharding_to_indices(self._hlo_sharding, global_shape,
-                                    len(self._devices))
-  return dict(safe_zip(self._devices, indices))
-
-
 @use_cpp_class(xc.GSPMDSharding)
-class GSPMDSharding(XLACompatibleSharding):
+class GSPMDSharding(sharding.Sharding):
   _devices: tuple[Device, ...]
   _hlo_sharding: xc.HloSharding
   _memory_kind: str | None
@@ -891,9 +800,6 @@ class GSPMDSharding(XLACompatibleSharding):
 
   def with_memory_kind(self, kind: str) -> GSPMDSharding:
     return GSPMDSharding(self._devices, self._hlo_sharding, memory_kind=kind)
-
-  def devices_indices_map(self, global_shape: Shape) -> Mapping[Device, Index]:
-    return gspmd_sharding_devices_indices_map(self, global_shape)
 
   @property
   def _device_assignment(self) -> XLADeviceAssignment:
@@ -1148,9 +1054,10 @@ def prepare_axis_resources(axis_resources,
       if isinstance(entry, PmapSharding):
         raise ValueError(f'One of {what} got sharding {entry} which is not '
                          'allowed.')
-      if not isinstance(entry, XLACompatibleSharding):
-        raise ValueError(f'One of {what} got sharding {entry} which is not a '
-                         'subclass of XLACompatibleSharding.')
+      if xla_extension_version < 270:
+        if not isinstance(entry, XLACompatibleSharding):
+          raise ValueError(f'One of {what} got sharding {entry} which is not a '
+                           'subclass of XLACompatibleSharding.')
       new_entries.append(entry)
     else:
       new_entries.append(ParsedPartitionSpec.from_user_input(
@@ -1164,7 +1071,7 @@ def _check_unique_resources(axis_resources, arg_name):
   for arg_axis_resources in axis_resources:
     if not arg_axis_resources: continue
     if (is_unspecified_or_auto(arg_axis_resources) or
-        isinstance(arg_axis_resources, XLACompatibleSharding)):
+        isinstance(arg_axis_resources, sharding.Sharding)):
       continue
     constrained_dims = [d for d in arg_axis_resources if d is not None]
     resource_counts = collections.Counter(
@@ -1394,6 +1301,192 @@ def _slice_as_tuple(s: slice):
   return (s.start, s.stop)
 
 
+class NonUniformShardingError(ValueError):
+  """Raised when sharding is not uniform across processes."""
+
+
+def get_process_index_and_count(
+    tensor_sharding: sharding.Sharding,
+    dim: int,
+    ndims: int,
+) -> tuple[int, int]:
+  """Get current process index and number of unique processes for given dimension.
+
+  This function facilitates mapping of process-level data to individual
+  devices. Each process can use its index to obtain the data corresponding
+  to that index. If process level data is sharded on multiple dimensions
+  this function can be used to build the cross product of indices in
+  each sharded axis. Processes that need to load the same data will have
+  the same index. For shardings whose per-process data is not distributed
+  on a grid, the number of distinct shards will be such that it is possible to
+  build the target shape while maintaining a "cube" shape of local-process data.
+
+  For example, in case of 4 hosts with sharding distributed like so:
+
+  1234
+  2143
+
+  For dim 0 (rows): all processes need to access all rows, so we return (0, 1)
+  For dim 1 (cols):
+     process 1 and 2 returns index 0 out of 2 (need cols 0 and 1),
+     process 3 and 4 returns index 1 out of 2 (need cols 2 and 3).
+
+  On the other hand, for a sharding like:
+
+  1212
+  3434
+
+  Dim 0 (rows): process 1 and 2 returns (0, 2), process 3 and 4 returns (1, 2)
+  Dim 1 (cols): process 1 and 3 returns (0, 2), process 2 and 4 returns (1, 2)
+
+  Note: This function requires sharding to be process uniform in dimension
+  `dim`:
+   each process has the same number of addressable indices in that
+  dimension and all index sets across processes are either disjoint or the same.
+
+  For sharding to be process uniform the addressable shards doesn't need to
+  form contiguous subtensor, or even a sparse grid  and  in case of
+  interleaved high-dimensional tensor it is possible for sharding to be
+  process uniform only in some dimensions but not others.
+
+  For example:
+    1111 and 12 and 1212 and 1212
+    2222     21     2121     1212
+
+  are all sharding uniform, in both dimensions. However
+
+    1122
+    2121
+    1121
+    1222
+
+  is uniform in dimension 0 (both hosts access all rows), but
+  is not uniform in dimension 1 (host 1 accesses columns: 0, 1, and 3),
+  while host 2 accesses (0, 1, 2, 3).
+
+  Returns:
+    A tuple of (index, num_distinct_shards) for the given dimension.
+    It is guaranteed that `index` will cover 0 to `num_distinct_shards - 1`,
+    across all processes.
+
+  Raises:
+    NonUniformShardingError: if the sharding is not process uniform in dimension
+    `dim`.
+  """
+  # TODO(sandler, yashkatariya): Consider making this function public.
+
+  if (
+      tensor_sharding.is_fully_addressable
+      or tensor_sharding.is_fully_replicated
+  ):
+    return (0, 1)
+  num_devices = len(tensor_sharding.device_set)
+  # Get device to indices map, we don't care about the concrete
+  # global shape here, only to get the distribution of shards across the tensor
+  # using (num_devices, num_devices, ...)  This is a universal shape that is
+  # compatible with any mesh with num_devices.
+  device_map = tensor_sharding.devices_indices_map((num_devices,) * ndims)
+
+  # Get the slices for 'dim' for all devices.
+  global_slice = {k: v[dim] for k, v in device_map.items()}
+
+  # Contains mapping from process_index to a set of slices for that process.
+  process_to_slice = collections.defaultdict(set)
+  # Contains global set of slices across all processes.
+  all_slices = set()
+
+  # Compute the set of slices for each process and the global set of slices.
+  for d, v in global_slice.items():
+    key = (v.start, v.stop)
+    process_to_slice[d.process_index].add(key)
+    all_slices.add(key)
+
+  # Get the set of slices for the current process which we will use to compute
+  # the index of the current process.
+  current_pid = next(iter(tensor_sharding.addressable_devices)).process_index
+  addressable_slices = frozenset(process_to_slice[current_pid])
+
+  # Verify that all processes have the same number of slices.
+  slices_per_process = len(addressable_slices)
+  if any(len(x) != slices_per_process for x in process_to_slice.values()):
+    raise NonUniformShardingError(
+        f'{tensor_sharding=} is non-uniform on {dim=} as some processes have '
+        'different number of slices.'
+    )
+  unique_processes = list({frozenset(x) for x in process_to_slice.values()})
+
+  # After removing duplicate processes all unique slices should
+  # cover the dimension exactly once. If they don' it means that
+  # the sharding is not uniform.
+  if sum(len(h) for h in unique_processes) != len(all_slices):
+    raise NonUniformShardingError(
+        f'{tensor_sharding=} is non-uniform on {dim=}'
+    )
+  return (unique_processes.index(addressable_slices), len(unique_processes))
+
+
+def local_to_global_shape(
+    sharding: sharding.Sharding,
+    local_shape: Shape,
+) -> tuple[int | None, ...]:
+  """Computes the global shape given the per process if possible.
+
+  The returned shape will have the size of the global tensor in that dimension
+  or None, if it is not computable. The latter can happen when sharding
+  is not uniform along that dimension, e.g. different hosts require
+  different shapes, or if different processes have partial data overlap.
+
+  If at most one dimension is sharded the shape is always computable.
+  Generally, global shape is computable for most practical meshes (including
+  topology aware such as meshes returned by mesh_utils.create_device_mesh)
+
+  Some examples: Suppose mesh is {'a': 2, 'b': 2, 'c': 2} with 2 devices
+  per host, 4 hosts total. For different specs we get:
+  - P():
+      global_shape = local_shape
+
+  - P(('a', 'b', 'c'), None):
+      global_shape =  (4 * local_shape[0], local_shape[1])
+      Note: per device shape is (local_shape[0] / 2, local_shape[1])
+
+  - P(('a', 'b'), None)
+      global_shape =  (4 * local_shape[0], local_shape[1])
+      # NB: the same global shape as above, since sharding along 'c' dimension
+      # happens to be within process, and thus doesn't affect the global shape.
+      # The underlying difference will be in the per *device* shape, which
+      # would be  (local_shape[0], local_shape[1]) in this case.
+
+  - P(None, ('a', 'c'))
+      global_shape = (local_shape[0], 2 * local_shape[1])
+      # Per device shape is (local_shape[0], local_shape[1] / 2)
+  - P(('a', 'c'), 'b'):
+      global_shape = (2 * local_shape[0], 2 * local_shape[1])
+      # Per device shape is (local_shape[0] / 2, local_shape[1])
+  - If devices in the Mesh are randomly permuted: For any partition spec
+  which shards more than 1 axis:  e.g. P('a', ('b', 'c')):
+      global_shape = (None, None)
+
+  Args:
+    local_shape: global shape of the tensor.
+
+  Returns:
+    global_shape with Nones in non-uniform dimensions.
+  """
+
+  global_shape : list[int | None] = [None] * len(local_shape)
+  for i, local_dim in enumerate(local_shape):
+    try:
+      _, shard_count = get_process_index_and_count(
+          sharding, i, ndims=len(local_shape)
+      )
+      global_shape[i] = local_dim * shard_count
+    except NonUniformShardingError:
+      global_shape[i] = None
+      continue
+
+  return tuple(global_shape)
+
+
 def num_addressable_indices(
     tensor_sharding: sharding.Sharding,
     dim: int,
@@ -1478,7 +1571,7 @@ def make_key_array_phys_sharding(aval, sharding):
 
 
 def physical_sharding(
-    aval, sharding: XLACompatibleSharding) -> XLACompatibleSharding:
+    aval, sharding: sharding.Sharding) -> sharding.Sharding:
   return make_key_array_phys_sharding(aval, sharding)
 
 
@@ -1495,7 +1588,7 @@ def get_logical_gspmd_sharding(aval, phys_sharding):
   return GSPMDSharding(phys_sharding._device_assignment,
                        xc.HloSharding.from_proto(logical_op_sharding))
 
-def check_replicated_trailing_dims(sharding: XLACompatibleSharding, aval):
+def check_replicated_trailing_dims(sharding: sharding.Sharding, aval):
   if isinstance(sharding, PmapSharding):
     return
   phys_aval = core.physical_aval(aval)
@@ -1508,7 +1601,7 @@ def check_replicated_trailing_dims(sharding: XLACompatibleSharding, aval):
         f" sharding: {sharding}, partitions: {partitions}, "
         f"num_trailing_dims: {num_trailing_dims}")
 
-def logical_sharding(aval, phys_sharding) -> XLACompatibleSharding:
+def logical_sharding(aval, phys_sharding) -> sharding.Sharding:
   # The trailing dims should always be replicated.
   check_replicated_trailing_dims(phys_sharding, aval)
 

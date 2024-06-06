@@ -32,10 +32,10 @@ from jax._src import test_util as jtu
 from jax._src.lax.control_flow.for_loop import for_loop
 from jax._src.pallas.pallas_call import _trace_to_jaxpr
 from jax.experimental import pallas as pl
-from jax.experimental.pallas.ops import attention
-from jax.experimental.pallas.ops import layer_norm
-from jax.experimental.pallas.ops import rms_norm
-from jax.experimental.pallas.ops import softmax
+from jax.experimental.pallas.ops.gpu import attention
+from jax.experimental.pallas.ops.gpu import layer_norm
+from jax.experimental.pallas.ops.gpu import rms_norm
+from jax.experimental.pallas.ops.gpu import softmax
 from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import numpy as np
@@ -1300,7 +1300,11 @@ class PallasOpsTest(PallasTest):
       pl.debug_print("It works!")
 
     x = jnp.array([4.2, 2.4]).astype(jnp.float32)
-    kernel(x)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+      jax.effects_barrier()
+
+    self.assertIn("It works!", output())
 
   def test_debug_print_with_values(self):
     @functools.partial(
@@ -1310,10 +1314,14 @@ class PallasOpsTest(PallasTest):
         compiler_params=dict(triton=dict(num_warps=1, num_stages=1))
     )
     def kernel(x_ref, o_ref):
-      pl.debug_print("x[0] = ", x_ref[0])
+      pl.debug_print("x[0] =", x_ref[0])
 
     x = jnp.array([4.2, 2.4]).astype(jnp.float32)
-    kernel(x)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+      jax.effects_barrier()
+
+    self.assertIn("x[0] = 4.2", output())
 
   @parameterized.parameters(
       ((2, 4), (8,)),

@@ -44,7 +44,7 @@ from jax.sharding import PartitionSpec as P
 from jax.experimental import multihost_utils
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src import array
-from jax._src.sharding import Sharding
+from jax._src.sharding import Sharding, common_devices_indices_map
 from jax._src import op_shardings
 from jax._src import sharding_impls
 from jax._src.sharding_impls import (
@@ -2209,30 +2209,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertTrue(out2.sharding.is_equivalent_to(out.sharding, out.ndim))
     self.assertArraysEqual(out2, inp_data)
 
-  def test_not_xlacompatible_sharding_error(self):
-    shape = (8, 2)
-    inp_data = np.arange(math.prod(shape)).reshape(shape)
-    ts = TempSharding(jax.devices())
-    arr = array.make_array_from_callback(
-        shape, ts, lambda idx: inp_data[idx])
-    with self.assertRaisesRegex(
-        ValueError,
-        'One of the argument to pjit got sharding.*which is not a subclass of '
-        'XLACompatibleSharding.'):
-      pjit(lambda x: x)(arr)
-
-    with self.assertRaisesRegex(
-        ValueError,
-        'One of in_shardings leaf specifications got sharding.*which is '
-        'not a subclass of XLACompatibleSharding.'):
-      pjit(lambda x: x, in_shardings=ts)(arr)
-
-    with self.assertRaisesRegex(
-        ValueError,
-        'One of out_shardings leaf specifications got sharding.*which is '
-        'not a subclass of XLACompatibleSharding.'):
-      pjit(lambda x: x, out_shardings=ts)(arr)
-
   def test_array_enabled_non_empty_mesh_with_pspec(self):
     arr = jnp.array([1, 2, 3])
     with self.assertRaisesRegex(
@@ -2378,18 +2354,18 @@ class ArrayPjitTest(jtu.JaxTestCase):
     out1 = f(arr)
     self.assertIsInstance(out1.sharding, NamedSharding)
     out1.sharding.devices_indices_map(shape)
-    cache_info1 = sharding_impls.common_devices_indices_map.cache_info()
+    cache_info1 = common_devices_indices_map.cache_info()
 
     out2 = f(out1)
     self.assertIsInstance(out2.sharding, NamedSharding)
     out2.sharding.devices_indices_map(shape)
-    cache_info2 = sharding_impls.common_devices_indices_map.cache_info()
+    cache_info2 = common_devices_indices_map.cache_info()
     self.assertEqual(cache_info2.hits, cache_info1.hits + 1)
 
     out3 = f(out2)
     self.assertIsInstance(out3.sharding, NamedSharding)
     out3.sharding.devices_indices_map(shape)
-    cache_info3 = sharding_impls.common_devices_indices_map.cache_info()
+    cache_info3 = common_devices_indices_map.cache_info()
     self.assertEqual(cache_info3.hits, cache_info2.hits + 1)
 
   def test_aot_compile_in_tree_mismatch(self):
@@ -3181,7 +3157,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     mesh = jtu.create_global_mesh((1,), ('x',))
     with self.assertRaisesRegex(
         RuntimeError,
-        "jax.jit only supports `XLACompatibleSharding`s being passed to "
+        "jax.jit only supports `Sharding`s being passed to "
         "in_shardings"):
       with mesh:
         jax.jit(lambda x: x, in_shardings=P('x'),
@@ -4201,31 +4177,38 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertEqual(out_info[0].sharding, None)
     self.assertEqual(out_info[1].sharding, None)
 
+  def test_jit_specialize(self):
+    def f(x):
+      return x * 2
 
-class TempSharding(Sharding):
+    specialized = jax.jit(f).specialize(jnp.arange(8, dtype=jnp.int32))
+    self.assertLen(specialized.jaxpr.eqns, 1)
+    self.assertEqual(jax.tree.structure(specialized.out_info).num_leaves, 1)
+    self.assertEqual(specialized.out_info.shape, (8,))
+    self.assertEqual(specialized.out_info.dtype, jnp.int32)
+    # one for args, one for kwargs (though kwargs is empty)
+    self.assertLen(specialized.in_avals, 2)
+    self.assertLen(specialized.in_avals[0], 1)
+    self.assertLen(specialized.in_avals[1], 0)  # empty kwarg
 
-  def __init__(self, devices):
-    super().__init__()
-    self._devices = devices
-    self._internal_device_list = xc.DeviceList(tuple(self._devices))
+  def test_jit_specialize_lower_and_compile(self):
+    def f(x):
+      return x * 2
 
-  @property
-  def device_set(self):
-    return set(self._devices)
+    lowered = jax.jit(f).specialize(jnp.arange(8)).lower()
+    self.assertEqual(lowered.args_info[0][0].shape, (8,))
 
-  def devices_indices_map(self, global_shape):
-    return {d: (slice(None),) * len(global_shape) for d in self.device_set}
+    compiled = lowered.compile()
+    out = compiled(jnp.arange(8))
+    self.assertArraysEqual(out, np.arange(8) * 2)
 
-  def shard_shape(self, global_shape):
-    return global_shape
+    # fast-forward
+    lowered2 = jax.jit(f).lower(jnp.arange(8))
+    self.assertEqual(lowered2.args_info[0][0].shape, (8,))
 
-  @property
-  def memory_kind(self):
-    return None
-
-  @property
-  def is_fully_replicated(self):
-    return True
+    compiled2 = lowered2.compile()
+    out2 = compiled2(jnp.arange(8))
+    self.assertArraysEqual(out2, np.arange(8) * 2)
 
 
 def spec_regex(s):
@@ -4769,19 +4752,19 @@ class UtilTest(jtu.JaxTestCase):
 
     ops = GSPMDSharding(devices, op1)
     ops.devices_indices_map(shape)
-    cache_info1 = sharding_impls.gspmd_sharding_devices_indices_map.cache_info()
+    cache_info1 = common_devices_indices_map.cache_info()
 
     ops.devices_indices_map(shape)
-    cache_info2 = sharding_impls.gspmd_sharding_devices_indices_map.cache_info()
+    cache_info2 = common_devices_indices_map.cache_info()
     self.assertEqual(cache_info2.hits, cache_info1.hits + 1)
 
     ops = GSPMDSharding(devices, op2)
     ops.devices_indices_map(shape)
-    cache_info3 = sharding_impls.gspmd_sharding_devices_indices_map.cache_info()
+    cache_info3 = common_devices_indices_map.cache_info()
     self.assertEqual(cache_info3.hits, cache_info2.hits + 1)
 
     ops.devices_indices_map(shape)
-    cache_info4 = sharding_impls.gspmd_sharding_devices_indices_map.cache_info()
+    cache_info4 = common_devices_indices_map.cache_info()
     self.assertEqual(cache_info4.hits, cache_info3.hits + 1)
 
   def test_op_sharding_semantically_replicated(self):

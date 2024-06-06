@@ -130,7 +130,7 @@ def debug_print(fmt, *args, uniform=True):
       raise NotImplementedError(arg.type)
     type_formats.append(ty_format)
     new_args.append(arg)
-  ctx = once if uniform else contextlib.nullcontext
+  ctx = single_thread if uniform else contextlib.nullcontext
   with ctx():
     gpu.printf(fmt.format(*type_formats) + "\n", new_args)
 
@@ -190,25 +190,28 @@ def thread_idx():
   return tidx
 
 
+def _warp_bcast(val, lane_idx=0):
+  i32 = ir.IntegerType.get_signless(32)
+  mask = c(0xFFFFFFFF, i32)
+  return nvvm.shfl_sync(
+      val.type, mask, val, c(lane_idx, i32), c(0x1F, i32), nvvm.ShflKind.idx
+  )
+
+
 def warp_idx(sync=True):
   i32 = ir.IntegerType.get_signless(32)
   warp_idx = arith.shrui(thread_idx(), c(5, i32))
-  if not sync:
-    return warp_idx
-  mask = c(0xFFFFFFFF, i32)
-  return nvvm.shfl_sync(
-      warp_idx.type, mask, warp_idx, c(0, i32), c(0x1F, i32), nvvm.ShflKind.idx
-  )
+  # Performing a warp broadcast improves performance as compiler understands
+  # that the value is uniform across the warp.
+  return _warp_bcast(warp_idx) if sync else warp_idx
+
 
 def warpgroup_idx(sync=True):
   i32 = ir.IntegerType.get_signless(32)
   wg_idx = arith.shrui(thread_idx(), c(7, i32))
-  if not sync:
-    return wg_idx
-  mask = c(0xFFFFFFFF, i32)
-  return nvvm.shfl_sync(
-      wg_idx.type, mask, wg_idx, c(0, i32), c(0x1F, i32), nvvm.ShflKind.idx
-  )
+  # Performing a warp broadcast improves performance as compiler understands
+  # that the value is uniform across the warp.
+  return _warp_bcast(wg_idx) if sync else wg_idx
 
 
 # True withon `once()` contexts.
@@ -216,11 +219,8 @@ _ONCE_REGION_ACTIVE = False
 
 
 @contextlib.contextmanager
-def once():
-  """Runs the context only from a single thread from the first warp.
-
-  The block is assumed to have a size of 1 in both y and z dimensions.
-  """
+def single_thread():
+  """Runs the context only from a single thread."""
   global _ONCE_REGION_ACTIVE
 
   if _ONCE_REGION_ACTIVE:
@@ -499,7 +499,7 @@ class BarrierArray:
     i32 = ir.IntegerType.get_signless(32)
     self.phases = memref.alloca(ir.MemRefType.get((), i32), [], [])
     memref.store(c(0, i32), self.phases, [])
-    with once():
+    with single_thread():
       for i in range(num_barriers):
         nvgpu.mbarrier_init(self.value, c(arrival_count, index), c(i, index))
     gpu.barrier()

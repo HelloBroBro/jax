@@ -234,6 +234,7 @@ py_library_providing_imports_info(
             "_src/debugger/**/*.py",
             "_src/extend/**/*.py",
             "_src/image/**/*.py",
+            "_src/export/**/*.py",
             "_src/lax/**/*.py",
             "_src/nn/**/*.py",
             "_src/numpy/**/*.py",
@@ -568,6 +569,7 @@ pytype_strict_library(
         ":partial_eval",
         ":path",
         ":pickle_util",
+        ":sharding",
         ":sharding_impls",
         ":source_info_util",
         ":state_types",
@@ -600,6 +602,7 @@ pytype_strict_library(
         exclude = [
             "experimental/pallas/gpu.py",
             "experimental/pallas/tpu.py",
+            "experimental/pallas/ops/gpu/**/*.py",
             "experimental/pallas/ops/tpu/**/*.py",
         ],
     ),
@@ -762,6 +765,7 @@ pytype_strict_library(
     name = "sharding",
     srcs = ["_src/sharding.py"],
     deps = [
+        ":op_shardings",
         ":util",
         ":xla_bridge",
         "//jax/_src/lib",

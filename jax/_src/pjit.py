@@ -64,6 +64,7 @@ from jax._src.lib import xla_extension_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import func as func_dialect
 from jax._src.lib import xla_client as xc
+from jax._src import sharding
 from jax._src.sharding_impls import (
     NamedSharding, XLACompatibleSharding, GSPMDSharding,
     SingleDeviceSharding, PmapSharding, AUTO, UNSPECIFIED, UnspecifiedValue,
@@ -170,7 +171,7 @@ class PjitInfo(NamedTuple):
 
 
 def _python_pjit_helper(jit_info, *args, **kwargs):
-  (args_flat, _, params, _, out_tree, _, arg_names,
+  (args_flat, params, _, out_tree, _, arg_names,
    attrs_tracked) = _infer_params(jit_info, args, kwargs)
 
   for arg in args_flat:
@@ -479,7 +480,7 @@ def _make_jit_wrapper(jit_info: PjitInfo):
     lowering_parameters = kwargs.pop(
         '_experimental_lowering_parameters', mlir.LoweringParameters())
 
-    (args_flat, flat_global_in_avals, params, in_tree, out_tree,
+    (args_flat, params, in_tree, out_tree,
      donated_invars, arg_names, _) = _infer_params(jit_info, args, kwargs)
     try:
       lowering = _resolve_and_lower(
@@ -495,22 +496,40 @@ def _make_jit_wrapper(jit_info: PjitInfo):
       raise ValueError(msg) from None
 
     donate_argnums = tuple(i for i, d in enumerate(donated_invars) if d)
+    jaxpr = params["jaxpr"]
     return stages.Lowered.from_flat_info(
-        lowering, in_tree, flat_global_in_avals, donate_argnums,
-        out_tree, fun_name=params["name"], jaxpr=params["jaxpr"])
+        lowering, in_tree, jaxpr.in_avals, donate_argnums, out_tree,
+        fun_name=params["name"], jaxpr=jaxpr)
 
   @api_boundary
   def eval_shape(*args, **kwargs):
-    _, _, params, _, out_tree, _, _, _ = _infer_params(jit_info, args, kwargs)
+    _, params, _, out_tree, _, _, _ = _infer_params(jit_info, args, kwargs)
     out_s = [None if is_unspecified(s) else s for s in params['out_shardings']]
     # TODO(yashkatariya): Add `Layout` to SDS.
     out = [api.ShapeDtypeStruct(x.shape, x.dtype, x.named_shape, sharding=s)
            for x, s in zip(params['jaxpr'].out_avals, out_s)]
     return tree_unflatten(out_tree, out)
 
+  @api_boundary
+  def specialize(*args, **kwargs) -> stages.Specialized:
+    lowering_parameters = kwargs.pop(
+        '_experimental_lowering_parameters', mlir.LoweringParameters())
+
+    args_flat, params, in_tree, out_tree, donated_invars, _, _ = _infer_params(
+        jit_info, args, kwargs)
+
+    donate_argnums = tuple(i for i, d in enumerate(donated_invars) if d)
+    jaxpr = params['jaxpr']
+    args_info = stages.make_args_info(in_tree, jaxpr.in_avals, donate_argnums)
+    lower_callable = partial(_resolve_and_lower, args_flat, **params,
+                             lowering_parameters=lowering_parameters)
+    return stages.Specialized(jaxpr, args_info, params["name"], out_tree,
+                              lower_callable)
+
   wrapped = _cpp_pjit(jit_info)
   wrapped.lower = lower
   wrapped.eval_shape = eval_shape
+  wrapped.specialize = specialize
   return wrapped
 
 
@@ -656,7 +675,7 @@ def _infer_params(jit_info, args, kwargs):
       keep_unused=keep_unused,
       inline=inline,
   )
-  return (consts + args_flat, in_type, params, in_tree, out_tree(),
+  return (consts + args_flat, params, in_tree, out_tree(),
           donated_invars, dbg.arg_names if dbg else None, attrs_tracked)
 
 def _extract_implicit_args(
@@ -703,6 +722,9 @@ class JitWrapped(stages.Wrapped):
 
   def eval_shape(self, *args, **kwargs):
     """See ``jax.eval_shape``."""
+    raise NotImplementedError
+
+  def specialize(self, *args, **kwargs) -> stages.Specialized:
     raise NotImplementedError
 
 
@@ -784,7 +806,7 @@ def pjit(
 
       The valid resource assignment specifications are:
 
-      - :py:class:`XLACompatibleSharding`, which will decide how the value
+      - :py:class:`Sharding`, which will decide how the value
         will be partitioned. With this, using a mesh context manager is not
         required.
       - :py:obj:`None` is a special case whose semantics are:
@@ -906,10 +928,10 @@ def hashable_pytree(pytree):
 def _create_sharding_for_array(mesh, x, name, api_name):
   if x is None and (mesh is None or mesh.empty):
     return UNSPECIFIED
-  if isinstance(x, XLACompatibleSharding) or is_unspecified_or_auto(x):
+  if isinstance(x, sharding.Sharding) or is_unspecified_or_auto(x):
     return x
   if mesh is None:
-    msg = ('jax.jit only supports `XLACompatibleSharding`s being passed to'
+    msg = ('jax.jit only supports `Sharding`s being passed to'
            f' {name}. Looks like you are passing either `PartitionSpec` or `None`'
            f' which is not allowed in jax.jit.\n')
     if name == 'in_shardings':
@@ -925,7 +947,7 @@ def _create_sharding_for_array(mesh, x, name, api_name):
     raise RuntimeError(
         f'{api_name} requires a non-empty mesh if you are passing'
         f' `PartitionSpec`s or `None` to {name}! Is a mesh defined at the call'
-        f' site? Alternatively, provide `XLACompatibleSharding`s to {name} and'
+        f' site? Alternatively, provide `Sharding`s to {name} and'
         ' then the mesh context manager is not required.')
   # A nice user error is raised in prepare_axis_resources.
   assert x is None or isinstance(x, ParsedPartitionSpec), x
@@ -1206,7 +1228,7 @@ def _check_and_canonicalize_out_shardings(
     out_layouts_leaves, out_tree, out_type, debug_info, device_or_backend_set):
   orig_out_shardings = tree_unflatten(out_shardings_treedef, out_shardings_leaves)
   if (is_unspecified(orig_out_shardings) or
-      isinstance(orig_out_shardings, XLACompatibleSharding)):
+      isinstance(orig_out_shardings, sharding.Sharding)):
     out_shardings_flat = (orig_out_shardings,) * len(out_type)
   else:
     out_shardings_flat = flatten_axis_resources(
@@ -1306,7 +1328,7 @@ def pjit_check_aval_sharding(
           f'annotation {s}: {e}')
     # Use the `OpSharding` proto to find out how many ways each dimension of
     # the aval is sharded. This approach will work across all
-    # XLACompatibleSharding.
+    # Sharding.
     hlo_sharding = s._to_xla_hlo_sharding(len(shape))
     assert hlo_sharding is not None
     num_ways_dim_sharded, _ = op_shardings.get_num_ways_dim_sharded(hlo_sharding)
@@ -1395,9 +1417,10 @@ def _resolve_in_shardings(
     # not allow None as the sharding.
     if arg_s is None:
       continue
-    if not isinstance(arg_s, XLACompatibleSharding):
-      raise ValueError(f'One of the argument to pjit got sharding {arg_s} '
-                       'which is not a subclass of XLACompatibleSharding.')
+    if xla_extension_version < 270:
+      if not isinstance(arg_s, XLACompatibleSharding):
+        raise ValueError(f'One of the argument to pjit got sharding {arg_s} '
+                         'which is not a subclass of XLACompatibleSharding.')
     # Don't consider PmapSharding inputs as committed. They will get resharded
     # unconditionally.
     if isinstance(arg_s, PmapSharding):
@@ -1900,7 +1923,7 @@ batching.axis_primitive_batchers[pjit_p] = partial(_pjit_batcher, False, None)
 pxla.spmd_primitive_batchers[pjit_p] = partial(_pjit_batcher, True, None)
 
 def _pjit_batcher_for_sharding(
-    s: XLACompatibleSharding | UnspecifiedValue,
+    s: sharding.Sharding | UnspecifiedValue,
     dim: int, val: tuple[str, ...], mesh, ndim: int):
   if is_unspecified(s):
     return s
