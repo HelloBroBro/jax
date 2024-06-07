@@ -1334,6 +1334,7 @@ class VectorLayoutInferer {
     auto some_src_layout = getLayout(op.getSource());
     TPU_CHECK_OP(some_src_layout, "missing vector layout");
     auto layout = *some_src_layout;
+    const std::array<int64_t, 2> vreg_slice = layout.vregSlice(target_shape_);
     if (layout.implicit_dim() == ImplicitDim::kNone) {
       // Nothing changes in the last two dims.
       if (res_rank >= 2 && src_shape.take_back(2) == res_shape.take_back(2)) {
@@ -1341,13 +1342,14 @@ class VectorLayoutInferer {
         return success();
       }
       // Sublane (un)tiling.
-      if (res_rank >= 2 && layout.tiling()[1] == target_shape_[1] &&
-          src_ty.getDimSize(src_ty.getRank() - 1) ==
-              res_shape[res_shape.size() - 1] &&
-          src_ty.getDimSize(src_ty.getRank() - 2) % layout.tiling()[0] == 0 &&
-          res_shape[res_shape.size() - 2] % layout.tiling()[0] == 0) {
-        layout = VectorLayout(layout.bitwidth(), {0, 0}, layout.tiling(),
-                              layout.implicit_dim());
+      if (res_rank >= 2 && *(src_shape.end() - 1) == *(res_shape.end() - 1) &&
+          *(src_shape.end() - 2) % vreg_slice[0] == 0 &&
+          *(res_shape.end() - 2) % vreg_slice[0] == 0) {
+        // TODO(b/343808585): We shouldn't force second minor offset to 0 when
+        //                    unfolding, it's still a no-op, but we need to add
+        //                    support in apply-vector-layout.
+        layout = VectorLayout(layout.bitwidth(), {0, layout.offsets()[1]},
+                              layout.tiling(), layout.implicit_dim());
         setLayout(op, layout, layout);
         return success();
       }
@@ -1409,7 +1411,6 @@ class VectorLayoutInferer {
       if (res_ty.getRank() >= 2) {
         // Squeeze out the sublane dim.
         if (layout_shape[0] == 1 &&
-            res_shape.drop_back(1) == src_shape.drop_back(2) &&
             res_shape.back() == src_shape.back()) {
           setLayout(op, layout,
                     VectorLayout(bitwidth, layout.offsets(), layout.tiling(),
@@ -1427,28 +1428,28 @@ class VectorLayoutInferer {
           return success();
         }
       } else if (res_ty.getRank() == 1) {
-        bool all_one = true;
-        for (int64_t s : src_ty.getShape().drop_back(2)) {
-          all_one &= s == 1;
-        }
-        // Squeeze out everything, but lanes
-        if (layout_shape[0] == 1 && all_one &&
-            res_ty.getShape().back() == layout_shape[1]) {
+        // All dimensions have been folded into a single one
+
+        // Squeeze all but minor dimension
+        if (res_ty.getShape().back() == layout_shape[1]) {
+          // The condition implies that everything apart from the minor
+          // dimension is 1 in the source.
           setLayout(op, layout,
                     VectorLayout(bitwidth, layout.offsets(), layout.tiling(),
                                  ImplicitDim::kSecondMinor));
           return success();
         }
-        // Squeeze out everything, but sublanes
-        if (layout_shape[1] == 1 && all_one &&
-            res_ty.getShape().back() == layout_shape[0]) {
-          TPU_CHECK_OP(src_ty.getElementTypeBitWidth() == kNativeBitwidth,
-                       "only 32-bit shape casts supported");
+        // Squeeze all but second minor dimension
+        if (res_ty.getShape().back() == layout_shape[0]) {
+          // The condition implies that everything apart from the second minor
+          // dimension is 1 in the source
           setLayout(op, layout,
                     VectorLayout(kNativeBitwidth, layout.offsets(),
                                  layout.tiling(), ImplicitDim::kMinor));
           return success();
         }
+        // TODO(b/340625465): Add case where layout_shape is (1, 1) and we fold
+        //                    batch dimensions once we support 0-D layouts.
       }
     } else {
       // Nothing changes in the last dim.

@@ -853,13 +853,14 @@ def make_array_from_process_local_data(
   local_shape = local_data.shape
   if global_shape is None:
     global_shape = local_to_global_shape(sharding, local_shape)  # type: ignore[assignment]
-  assert global_shape is not None
-  if not all(x is not None for x in global_shape):
-    raise ValueError("Unable to compute global_shape in some dimensions."
-                     "Most likely you are using non-uniform sharding."
-                     "Consider specifying global shape directly. "
-                     f"Partially computed {global_shape=}. ")
-
+    assert global_shape is not None
+    if None in global_shape:
+      raise ValueError(
+          "Unable to compute global_shape due to non-uniform sharding."
+          f" Specify global shape directly. Partially computed {global_shape=}."
+      )
+  elif None in global_shape:
+    raise ValueError(f"{global_shape=} has Nones. This is not supported.")
   shard_shape = sharding.shard_shape(global_shape)
   full_dim = []
   for i, (data_dim, global_dim) in enumerate(

@@ -46,15 +46,13 @@ import numpy as np
 
 config.parse_flags_with_absl()
 
-prev_xla_flags = None
-def setUpModule():
-  global prev_xla_flags
-  # This will control the CPU devices. On TPU we always have 2 devices
-  prev_xla_flags = jtu.set_host_platform_device_count(2)
+_exit_stack = contextlib.ExitStack()
 
-# Reset to previous configuration in case other test modules will be run.
+def setUpModule():
+  _exit_stack.enter_context(jtu.set_host_platform_device_count(2))
+
 def tearDownModule():
-  prev_xla_flags()
+  _exit_stack.close()
 
 ### Setup for testing lowering with effects
 @dataclasses.dataclass(frozen=True)
@@ -369,6 +367,28 @@ class JaxExportTest(jtu.JaxTestCase):
     )(a)
     self.assertIn("disallowed_call_target", exp.mlir_module())
 
+  def test_lowering_parameters_for_export(self):
+    # Test that we propagate properly the LoweringParameters.for_export
+    test_primitive = core.Primitive("_test_primitive_for_export")
+    test_primitive.def_abstract_eval(lambda in_aval: in_aval)
+    def test_primitive_lowering(ctx, arg):
+      if ctx.module_context.lowering_parameters.for_export:
+        raise ValueError("Lowering for export not supported")
+      return mlir.hlo.AddOp(arg, arg).results
+
+    mlir.register_lowering(test_primitive, test_primitive_lowering)
+    self.addCleanup(lambda: mlir.register_lowering(test_primitive, None))
+
+    f = test_primitive.bind
+    a = np.arange(3, dtype=np.float32)
+    res = jax.jit(f)(a)  # Works with JIT
+    self.assertAllClose(res, a + a)
+    jax.jit(f).lower(a)  # Works with most AOT
+
+    with self.assertRaisesRegex(ValueError,
+        "Lowering for export not supported"):
+      export.export(f)(a)
+
   def test_grad(self):
     f = lambda x: jnp.sum(jnp.sin(x))
     x = np.arange(4, dtype=np.float32)
@@ -534,9 +554,13 @@ class JaxExportTest(jtu.JaxTestCase):
         return jnp.sin(x)
 
       # This makes it look like a jitted-function
-      def lower(self, x,
-                _experimental_lowering_parameters=None):
+      def lower(self, x, _experimental_lowering_parameters=None):
         return jax.jit(self.__call__).lower(
+            x,
+            _experimental_lowering_parameters=_experimental_lowering_parameters)
+
+      def trace(self, x, _experimental_lowering_parameters=None):
+        return jax.jit(self.__call__).trace(
             x,
             _experimental_lowering_parameters=_experimental_lowering_parameters)
 
@@ -946,7 +970,7 @@ class JaxExportTest(jtu.JaxTestCase):
     # We can use other devices and other meshes for running
     run_devices = devices[::-1]
     run_mesh = Mesh(run_devices, "a")
-    run_input_shardings = exp.xla_compatible_in_shardings(run_mesh)
+    run_input_shardings = exp.in_shardings_jax(run_mesh)
     a_run = jax.device_put(a, run_input_shardings[0])
     b_run = jax.device_put(a, run_input_shardings[1])
     res = export.call(exp)(a_run, b_run)

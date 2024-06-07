@@ -8,12 +8,18 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## jax 0.4.29
 
-* Breaking changes
+* Changes
+  * We anticipate that this will be the last release of JAX and jaxlib
+    supporting a monolithic CUDA jaxlib. Future releases will use the CUDA
+    plugin jaxlib (e.g. `pip install jax[cuda12]`).
   * JAX now requires ml_dtypes version 0.4.0 or newer.
 
 * Deprecations
   * `jax.sharding.XLACompatibleSharding` is deprecated. Please use
     `jax.sharding.Sharding`.
+  * `jax.experimental.Exported.in_shardings` has been renamed as
+    `jax.experimental.Exported.in_shardings_hlo`. Same for `out_shardings`.
+    The old names will be removed after 3 months.
   * Removed a number of previously-deprecated APIs:
     * from {mod}`jax.core`: `non_negative_dim`, `DimSize`, `Shape`
     * from {mod}`jax.lax`: `tie_in`
@@ -31,11 +37,19 @@ Remember to align the itemized text with the first line of an item within a list
     some did unintentionally. Going forward, we recommend explicit use of
     {func}`jax.vmap` in such cases.
 
+* New Functionality
+  * Added {func}`jax.experimental.Exported.in_shardings_jax` to construct
+    shardings that can be used with the JAX APIs from the HloShardings
+    that are stored in the `Exported` objects.
+
 ## jaxlib 0.4.29
 
 * Bug fixes
-  * Fixes a bug where XLA sharded some concatenation operations incorrectly,
+  * Fixed a bug where XLA sharded some concatenation operations incorrectly,
     which manifested as an incorrect output for cumulative reductions (#21403).
+  * Fixed a bug where XLA:CPU miscompiled certain matmul fusions
+    (https://github.com/openxla/xla/pull/13301).
+  * Fixes a compiler crash on GPU (https://github.com/google/jax/issues/21396).
 
 ## jax 0.4.28 (May 9, 2024)
 

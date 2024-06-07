@@ -183,7 +183,8 @@ def check_eq(xs, ys, err_msg=''):
 def capture_stdout() -> Generator[Callable[[], str | None], None, None]:
   """Context manager to capture all stdout output."""
 
-  with tempfile.NamedTemporaryFile(mode="w+", delete=True) as f:
+  # The encoding should also work on windows, the default doesn't necessarily.
+  with tempfile.NamedTemporaryFile(mode="w+", delete=True, encoding='utf-8') as f:
     original_stdout = os.dup(sys.stdout.fileno())
     os.dup2(f.fileno(), sys.stdout.fileno())
 
@@ -505,8 +506,13 @@ def device_supports_buffer_donation():
   )
 
 
+@contextmanager
 def set_host_platform_device_count(nr_devices: int):
-  """Returns a closure that undoes the operation."""
+  """Context manager to set host platform device count if not specified by user.
+
+  This should only be used by tests at the top level in setUpModule(); it will
+  not work correctly if applied to individual test cases.
+  """
   prev_xla_flags = os.getenv("XLA_FLAGS")
   flags_str = prev_xla_flags or ""
   # Don't override user-specified device count, or other XLA flags.
@@ -515,13 +521,14 @@ def set_host_platform_device_count(nr_devices: int):
                                f" --xla_force_host_platform_device_count={nr_devices}")
   # Clear any cached backends so new CPU backend will pick up the env var.
   xla_bridge.get_backend.cache_clear()
-  def undo():
+  try:
+    yield
+  finally:
     if prev_xla_flags is None:
       del os.environ["XLA_FLAGS"]
     else:
       os.environ["XLA_FLAGS"] = prev_xla_flags
     xla_bridge.get_backend.cache_clear()
-  return undo
 
 
 def skip_on_flag(flag_name, skip_value):
