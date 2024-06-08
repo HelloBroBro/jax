@@ -171,7 +171,7 @@ class PjitInfo(NamedTuple):
 
 
 def _python_pjit_helper(jit_info, *args, **kwargs):
-  (args_flat, params, _, out_tree, _, arg_names,
+  (args_flat, params, in_avals, _, out_tree, _, arg_names, _,
    attrs_tracked) = _infer_params(jit_info, args, kwargs)
 
   for arg in args_flat:
@@ -197,7 +197,7 @@ def _python_pjit_helper(jit_info, *args, **kwargs):
     if params['jaxpr'].consts:
       raise TypeError(e.args[0]) from e
     else:
-      for arg, name, aval in zip(args_flat, arg_names, params['jaxpr'].in_avals):
+      for arg, name, aval in zip(args_flat, arg_names, in_avals):
         try:
           xla.canonicalize_dtype(arg)
         except xla.InvalidInputException as _:
@@ -491,7 +491,7 @@ def _make_jit_wrapper(jit_info: PjitInfo):
 
   @api_boundary
   def eval_shape(*args, **kwargs):
-    _, params, _, out_tree, _, _, _ = _infer_params(jit_info, args, kwargs)
+    _, params, _, _, out_tree, _, _, _, _ = _infer_params(jit_info, args, kwargs)
     out_s = [None if is_unspecified(s) else s for s in params['out_shardings']]
     # TODO(yashkatariya): Add `Layout` to SDS.
     out = [api.ShapeDtypeStruct(x.shape, x.dtype, x.named_shape, sharding=s)
@@ -503,16 +503,15 @@ def _make_jit_wrapper(jit_info: PjitInfo):
     lowering_parameters = kwargs.pop(
         '_experimental_lowering_parameters', mlir.LoweringParameters())
 
-    (args_flat, params, in_tree, out_tree, donated_invars,
-     arg_names, _) = _infer_params(jit_info, args, kwargs)
+    (args_flat, params, in_avals, in_tree, out_tree, donated_invars,
+     arg_names, num_consts, _) = _infer_params(jit_info, args, kwargs)
 
     donate_argnums = tuple(i for i, d in enumerate(donated_invars) if d)
-    jaxpr = params['jaxpr']
-    args_info = stages.make_args_info(in_tree, jaxpr.in_avals, donate_argnums)
+    args_info = stages.make_args_info(in_tree, in_avals, donate_argnums)
     lower_callable = partial(_resolve_and_lower, args_flat, **params,
                              lowering_parameters=lowering_parameters)
-    return stages.Traced(jaxpr, args_info, params["name"], out_tree,
-                         lower_callable, args_flat, arg_names)
+    return stages.Traced(params['jaxpr'], args_info, params["name"], out_tree,
+                         lower_callable, args_flat, arg_names, num_consts)
 
   wrapped = _cpp_pjit(jit_info)
   wrapped.lower = lower
@@ -662,8 +661,9 @@ def _infer_params(jit_info, args, kwargs):
       keep_unused=keep_unused,
       inline=inline,
   )
-  return (consts + args_flat, params, in_tree, out_tree(),
-          donated_invars, dbg.arg_names if dbg else None, attrs_tracked)
+  return (consts + args_flat, params, in_avals, in_tree, out_tree(),
+          donated_invars, dbg.arg_names if dbg else None, len(consts),
+          attrs_tracked)
 
 def _extract_implicit_args(
   in_type: Sequence[tuple[core.AbstractValue, bool]],
@@ -1098,7 +1098,9 @@ def explain_tracing_cache_miss(
       f"    {', '.join(map(repr, kwarg_keys))}")
     dont_match = [set(t[1].node_data()[1]) for t in args_kwargs_trees  # type: ignore
                   if t != [args_tree, kwargs_tree]]
-    close_kwargs = min(dont_match, key=set(kwarg_keys).symmetric_difference)
+    close_kwargs = min(
+        dont_match, key=set(kwarg_keys).symmetric_difference, default=None
+    )
     if not close_kwargs:
       p("  closest seen is passing no keyword args")
     else:
