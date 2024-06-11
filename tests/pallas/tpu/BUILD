@@ -1,4 +1,4 @@
-# Copyright 2023 The JAX Authors.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,37 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
+    "jax_generate_backend_suites",
+    "jax_test",
     "py_deps",
 )
 
+licenses(["notice"])
+
 package(
     default_applicable_licenses = [],
-    default_visibility = [
-        "//:__subpackages__",
-    ],
+    default_visibility = ["//visibility:private"],
 )
 
-py_library(
-    name = "pallas",
+jax_generate_backend_suites()
+
+jax_test(
+    name = "pallas_random_test",
     srcs = [
-        "__init__.py",
-        "core.py",
-        "pallas_call.py",
-        "primitives.py",
-        "utils.py",
+        "pallas_random_test.py",
+    ],
+    disable_backends = [
+        "cpu",
+        "gpu",
     ],
     deps = [
-        "//jax",
-        "//jax:ad_util",
-        "//jax:core",
-        "//jax:mlir",
-        "//jax:partial_eval",
-        "//jax:pretty_printer",
-        "//jax:tree_util",
-        "//jax:util",
-        "//jax/_src/lib",
+        "//jax:pallas",
+        "//jax:pallas_tpu",
+        "//jax/_src/pallas/mosaic:random",
+        "//third_party/py/absl/testing:absltest",
+        "//third_party/py/absl/testing:parameterized",
     ] + py_deps("numpy"),
 )

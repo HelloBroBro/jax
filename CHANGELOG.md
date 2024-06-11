@@ -6,7 +6,11 @@ Best viewed [here](https://jax.readthedocs.io/en/latest/changelog.html).
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
-## jax 0.4.29
+## jax 0.4.30
+
+## jaxlib 0.4.30
+
+## jax 0.4.29 (June 10, 2024)
 
 * Changes
   * We anticipate that this will be the last release of JAX and jaxlib
@@ -18,6 +22,7 @@ Remember to align the itemized text with the first line of an item within a list
     `from jax.experimental.export import export`, and instead you should use
     `from jax.experimental import export`.
     The removed functionality has been deprecated since 0.4.24.
+  * Added `is_leaf` argument to {func}`jax.tree.all` & {func}`jax.tree_util.tree_all`.
 
 * Deprecations
   * `jax.sharding.XLACompatibleSharding` is deprecated. Please use
@@ -47,7 +52,7 @@ Remember to align the itemized text with the first line of an item within a list
     shardings that can be used with the JAX APIs from the HloShardings
     that are stored in the `Exported` objects.
 
-## jaxlib 0.4.29
+## jaxlib 0.4.29 (June 10, 2024)
 
 * Bug fixes
   * Fixed a bug where XLA sharded some concatenation operations incorrectly,
