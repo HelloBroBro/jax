@@ -390,6 +390,7 @@ pytype_strict_library(
         ":compilation_cache_interface",
         ":config",
         ":gfile_cache",
+        ":lru_cache",
         ":monitoring",
         ":path",
         "//jax/_src/lib",
@@ -413,6 +414,15 @@ pytype_strict_library(
         ":path",
         ":util",
     ],
+)
+
+pytype_strict_library(
+    name = "lru_cache",
+    srcs = ["_src/lru_cache.py"],
+    deps = [
+        ":compilation_cache_interface",
+        ":config",
+    ] + py_deps("filelock"),
 )
 
 pytype_strict_library(
@@ -626,7 +636,6 @@ pytype_strict_library(
         ":pallas",  # build_cleaner: keep
         ":tpu_custom_call",
         "//jax/_src/pallas/mosaic:core",
-        "//jax/_src/pallas/mosaic:kernel_regeneration_util",
         "//jax/_src/pallas/mosaic:lowering",
         "//jax/_src/pallas/mosaic:pallas_call_registration",  # build_cleaner: keep
         "//jax/_src/pallas/mosaic:pipeline",

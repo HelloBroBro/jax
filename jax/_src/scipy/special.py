@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from functools import partial
 import operator
-from typing import cast, Any
+from typing import cast, overload, Any
 
 import numpy as np
 
@@ -28,6 +28,7 @@ from jax import lax
 
 from jax._src import core
 from jax._src import custom_derivatives
+from jax._src import deprecations
 from jax._src import dtypes
 from jax._src.lax.lax import _const as _lax_const
 from jax._src.numpy.util import promote_args_inexact, promote_dtypes_inexact
@@ -186,8 +187,16 @@ def factorial(n: ArrayLike, exact: bool = False) -> Array:
   n, = promote_args_inexact("factorial", n)
   return jnp.where(n < 0, 0, lax.exp(lax.lgamma(n + 1)))
 
+@overload
+def beta(a: ArrayLike, b: ArrayLike) -> Array: ...
 
-def beta(x: ArrayLike, y: ArrayLike) -> Array:
+@overload
+def beta(a: ArrayLike, *, y: ArrayLike) -> Array: ...
+
+@overload
+def beta(*, x: ArrayLike, y: ArrayLike) -> Array: ...
+
+def beta(*args, **kwds):
   r"""The beta function
 
   JAX implementation of :obj:`scipy.special.beta`.
@@ -209,9 +218,27 @@ def beta(x: ArrayLike, y: ArrayLike) -> Array:
     - :func:`jax.scipy.special.gamma`
     - :func:`jax.scipy.special.betaln`
   """
-  x, y = promote_args_inexact("beta", x, y)
-  sign = gammasgn(x) * gammasgn(y) * gammasgn(x + y)
-  return sign * lax.exp(betaln(x, y))
+  # TODO(jakevdp): deprecation warning added 2024-06-10; finalize after 2024-09-10
+  if 'x' in kwds:
+    msg = "The `x` parameter of jax.scipy.special.beta is deprecated, use `a` instead."
+    deprecations.warn('jax-scipy-beta-args', msg, stacklevel=2)
+    if 'a' in kwds:
+      raise TypeError("beta() got both parameter 'a' and parameter 'x'.")
+    kwds['a'] = kwds.pop('x')
+  if 'y' in kwds:
+    msg = "The `y` parameter of jax.scipy.special.beta is deprecated, use `b` instead."
+    deprecations.warn('jax-scipy-beta-args', msg, stacklevel=2)
+    if 'b' in kwds:
+      raise TypeError("beta() got both parameter 'b' and parameter 'y'.")
+    kwds['b'] = kwds.pop('y')
+  if extra := kwds.keys() - {'a', 'b'}:
+    raise TypeError(f"beta() got unexpected keyword arguments {list(extra)}")
+  return _beta(*args, **kwds)
+
+def _beta(a, b):
+  a, b = promote_args_inexact("beta", a, b)
+  sign = gammasgn(a) * gammasgn(b) * gammasgn(a + b)
+  return sign * lax.exp(betaln(a, b))
 
 
 def betainc(a: ArrayLike, b: ArrayLike, x: ArrayLike) -> Array:

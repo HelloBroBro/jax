@@ -784,6 +784,7 @@ jax_test(
 jax_test(
     name = "qdwh_test",
     srcs = ["qdwh_test.py"],
+    shard_count = 10,
 )
 
 jax_test(
@@ -1133,6 +1134,16 @@ py_test(
         "//jax:gfile_cache",
         "//jax:test_util",
     ],
+)
+
+py_test(
+    name = "lru_cache_test",
+    srcs = ["lru_cache_test.py"],
+    deps = [
+        "//jax",
+        "//jax:lru_cache",
+        "//jax:test_util",
+    ] + py_deps("filelock"),
 )
 
 jax_test(
