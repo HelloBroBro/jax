@@ -13,8 +13,29 @@ Remember to align the itemized text with the first line of an item within a list
     bumped to 0.4.0 but this has been rolled back in this release to give users
     of both TensorFlow and JAX more time to migrate to a newer TensorFlow
     release.
+  * `jax.experimental.mesh_utils` can now create an efficient mesh for TPU v5e.
+  * jax now depends on jaxlib directly. This change was enabled by the CUDA
+    plugin switch: there are no longer multiple jaxlib variants. You can install
+    a CPU-only jax with `pip install jax`, no extras required.
+  * Added an API for exporting and serializing JAX functions. This used
+    to exist in `jax.experimental.export` (which is being deprecated),
+    and will now live in `jax.export`.
+    See the [documentation](https://jax.readthedocs.io/en/latest/export/index.html).
+
+* Deprecations
+  * Internal pretty-printing tools `jax.core.pp_*` are deprecated, and will be removed
+    in a future release.
+  * Hashing of tracers is deprecated, and will lead to a `TypeError` in a future JAX
+    release. This previously was the case, but there was an inadvertent regression in
+    the last several JAX releases.
+  * `jax.experimental.export` is deprecated. Use {mod}`jax.export` instead.
+    See the [migration guide](https://jax.readthedocs.io/en/latest/export/export.html#migration-guide-from-jax-experimental-export).
 
 ## jaxlib 0.4.30
+
+  * Support for monolithic CUDA jaxlibs has been dropped. You must use the
+    plugin-based installation (`pip install jax[cuda12]` or
+    `pip install jax[cuda12_local]`).
 
 ## jax 0.4.29 (June 10, 2024)
 
