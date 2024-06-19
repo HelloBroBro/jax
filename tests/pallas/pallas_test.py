@@ -982,6 +982,21 @@ class PallasCallVmapTest(PallasTest):
     out_ref = jnp.arange(2, 10)
     np.testing.assert_allclose(out, out_ref)
 
+  def test_vmap_of_kernel_with_input_output_aliases_different_axes(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((4,), jnp.int32),
+        debug=False,
+        input_output_aliases={0: 0},
+        grid=(),
+    )
+    def add(x_ref, o_ref):
+      o_ref[()] = x_ref[()] + 1
+
+    out = jax.vmap(add, in_axes=1)(jnp.arange(8).reshape((4, 2)))
+    out_ref = jnp.arange(1, 9).reshape((4, 2)).swapaxes(0, 1)
+    np.testing.assert_allclose(out, out_ref)
+
   def test_vmap_of_slicing_kernel_different_axes(self):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
@@ -1118,6 +1133,17 @@ class PallasOpsTest(PallasTest):
       x = jnp.array([1, 2, 3, 4]).astype(x_dtype)
       y = jnp.array([1, 2, 3, 4]).astype(y_dtype)
       np.testing.assert_allclose(kernel(x, y), lax.pow(x, y))
+
+  @parameterized.parameters(0, 1, 2, 3, 4, 5, -1, -2, -3)
+  def test_integer_pow(self, y):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
+    )
+    def kernel(x_ref, o_ref):
+      o_ref[:] = lax.integer_pow(x_ref[...], y)
+
+    x = jnp.array([1, 2, 3, 4]).astype(jnp.float32) / 10
+    np.testing.assert_allclose(kernel(x), lax.integer_pow(x, y))
 
   @parameterized.parameters("float32", "float64")
   def test_nextafter(self, dtype):
@@ -2148,16 +2174,11 @@ class RmsNormInterpreterTest(PallasTest):
 
 class SoftmaxTest(PallasTest):
 
-  @parameterized.parameters(
-      (shape, dtype)
-      for shape in [(1024, 125), (4, 1024, 125)]
-      for dtype in (jnp.bfloat16, jnp.float16, jnp.float32)
+  @parameterized.product(
+      shape=[(1024, 125), (4, 1024, 125)],
+      dtype=[jnp.bfloat16, jnp.float16, jnp.float32]
   )
   def test_softmax(self, shape, dtype):
-    # TODO(bchetioui): add Triton bug reference when filed
-    if dtype == jnp.bfloat16:
-      raise absltest.SkipTest("Disabled due to Triton lowering bug")
-
     x = jax.random.normal(random.key(0), shape, dtype=dtype)
 
     atol, rtol = {
@@ -2166,9 +2187,11 @@ class SoftmaxTest(PallasTest):
         jnp.float32: (1e-7, 1e-6),
     }[dtype]
 
+    # We upcast to float32 because NumPy <2.0 does not handle custom dtypes
+    # properly. See https://github.com/google/jax/issues/11014.
     np.testing.assert_allclose(
-        softmax.softmax(x, axis=-1),
-        jax.nn.softmax(x, axis=-1),
+        softmax.softmax(x, axis=-1).astype(jnp.float32),
+        jax.nn.softmax(x, axis=-1).astype(jnp.float32),
         atol=atol,
         rtol=rtol,
     )
