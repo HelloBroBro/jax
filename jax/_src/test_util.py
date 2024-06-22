@@ -15,6 +15,7 @@
 # pyformat: disable
 from __future__ import annotations
 
+import collections
 from collections.abc import Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 import datetime
@@ -314,6 +315,21 @@ def count_jit_tracing_cache_miss():
     yield count
   finally:
     pjit_lib._create_pjit_jaxpr = original_create_pjit_jaxpr
+
+@contextmanager
+def count_jit_infer_params_cache_miss():
+  original_infer_params_impl = pjit_lib._infer_params_impl
+  count = collections.defaultdict(int)
+
+  def infer_params_impl_and_count(fun, *args, **kw):
+    count[fun] += 1
+    return original_infer_params_impl(fun, *args, **kw)
+
+  pjit_lib._infer_params_impl = infer_params_impl_and_count
+  try:
+    yield count
+  finally:
+    pjit_lib._infer_params_impl = original_infer_params_impl
 
 
 @contextmanager
@@ -1501,7 +1517,7 @@ def register_event_duration_listener(callback):
 def set_env(**kwargs):
   """Context manager to temporarily set/unset one or more environment variables.
 
-  Example:
+  Examples:
 
     >>> import os
     >>> os.environ['my_var'] = 'original'
