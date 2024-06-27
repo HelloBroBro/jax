@@ -16,8 +16,6 @@
 
 from functools import partial
 import operator
-import sys
-from typing import Optional
 
 from absl.testing import absltest, parameterized
 import jax
@@ -31,8 +29,6 @@ from jax._src.lib.mlir.dialects import vector
 import jax.numpy as jnp
 import numpy as np
 try:
-  if sys.version_info < (3, 10):
-    raise ImportError("Mosaic requires Python 3.10")
   import jax._src.lib.mosaic_gpu  # noqa: F401
   HAS_MOSAIC_GPU = True
 except ImportError:
@@ -68,7 +64,7 @@ def mlir_sum(elems):
   return total
 
 
-def copy(src: ir.Value, dst: ir.Value, swizzle: Optional[int] = None):
+def copy(src: ir.Value, dst: ir.Value, swizzle: int | None = None):
   index = ir.IndexType.get()
   thread_id = gpu.thread_id(gpu.Dimension.x)
   stride = gpu.block_dim(gpu.Dimension.x)
