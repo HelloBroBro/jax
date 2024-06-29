@@ -211,6 +211,11 @@ jax_test(
     ],
     main = "pallas_pipeline_tpu_test.py",
     shard_count = 2,
+    tags = [
+        "noasan",  # Times out.
+        "nomsan",  # Times out.
+        "notsan",  # Times out.
+    ],
     deps = [
         "//jax:extend",
         "//jax:pallas_tpu",
@@ -357,6 +362,5 @@ jax_test(
         "//jax:pallas",
         "//jax:pallas_gpu",  # build_cleaner: keep
         "//jax:pallas_tpu",  # build_cleaner: keep
-        "//jax/experimental/export",
     ],
 )
