@@ -20,7 +20,6 @@ import contextlib
 import copy
 import dataclasses
 import functools
-import inspect
 import threading
 from typing import Any, Union
 import warnings
@@ -171,10 +170,6 @@ blocked = Blocked()
 IndexingMode = Union[Blocked, Unblocked]
 
 
-_BLOCK_SPECSIG = inspect.Signature.from_callable(
-    lambda index_map, block_shape: ...
-)
-
 @dataclasses.dataclass(unsafe_hash=True)
 class BlockSpec:
   """Specifies how an array should be sliced for each iteration of a kernel.
@@ -188,14 +183,12 @@ class BlockSpec:
 
   def __init__(
       self,
-      *args,
+      block_shape: Any | None = None,
+      index_map: Any | None = None,
+      *,
       memory_space: Any | None = None,
       indexing_mode: IndexingMode = blocked,
-      **kwargs: Any,
   ) -> None:
-    bound_args = _BLOCK_SPECSIG.bind_partial(*args, **kwargs)
-    block_shape = bound_args.arguments.get("block_shape", None)
-    index_map = bound_args.arguments.get("index_map", None)
     if callable(block_shape):
       # TODO(slebedev): Remove this code path and update the signature of
       # __init__ after October 1, 2024.
