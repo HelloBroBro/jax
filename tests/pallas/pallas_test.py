@@ -16,6 +16,7 @@ import contextlib
 import functools
 import itertools
 import os
+import re
 import sys
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
@@ -228,6 +229,27 @@ class PallasCallTest(PallasTest):
     for i in range(5):
       np.testing.assert_allclose(index(x, i), x[i])
 
+  def test_pallas_call_no_outputs(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref: None, ())
+    self.assertAllClose((), f(a))
+
+  def test_pallas_call_out_shape_is_singleton_tuple(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=(a,))
+    res = f(a)
+    self.assertIsInstance(res, tuple)
+    self.assertLen(res, 1)
+
+  def test_pallas_call_out_shape_is_list(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=[a])
+    res = f(a)
+    # TODO(necula): we normalize out_shape to a tuple, we shouldn't.
+    self.assertIsInstance(res, tuple)
+
   def test_hoisted_consts(self):
     # See https://github.com/google/jax/issues/21557.
     x = jnp.zeros(32)
@@ -438,6 +460,112 @@ class PallasCallTest(PallasTest):
 
 
 class PallasCallInterpreterTest(PallasCallTest):
+  INTERPRET = True
+
+
+class ApiErrorTest(PallasTest):
+
+  def test_pallas_kernel_args_mismatch(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref: None,  # Missing o_ref
+                         out_shape=a)
+    with self.assertRaisesRegex(
+        TypeError,
+        "takes 1 positional argument but 2 were given"):
+      f(a)
+
+  @parameterized.named_parameters(
+      ("array", 0),
+      ("empty_tuple", ())
+  )
+  def test_pallas_call_error_kernel_returns_something(self, returns):
+    a = np.arange(256, dtype=np.int32)
+    # The kernel should not return anything
+    f = self.pallas_call(lambda x_ref, o1_ref, o2_ref: returns,
+                         out_shape=(a, a))
+    with self.assertRaisesRegex(
+        ValueError,
+        "The kernel function in a pallas_call should return None"):
+      f(a)
+
+  def test_pallas_call_in_specs_not_a_sequence(self):
+    a = np.arange(256, dtype=np.int32)
+    with self.assertRaisesRegex(
+        ValueError,
+        "`in_specs` must be a tuple or a list"):
+      _ = self.pallas_call(lambda x_ref, o1_ref: None,
+                           out_shape=a,
+                           in_specs=pl.BlockSpec((4,), lambda: 0))
+
+  def test_pallas_call_in_specs_mismatch_inputs(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=a,
+                         in_specs=[pl.BlockSpec((4,), lambda: 0),
+                                   pl.BlockSpec((4,), lambda: 0)])
+    with self.assertRaisesRegex(
+        ValueError,
+        re.compile("Pytree for `in_specs` and inputs do not match. "
+                   "There are 1 mismatches, including:"
+                   ".* at \\[1\\], `in_specs` is a pytree leaf but "
+                   "inputs is a.*", re.DOTALL)):
+      f(a, dict(a=a))
+
+  def test_pallas_call_index_map_wrong_number_of_arguments(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=a,
+                         in_specs=[pl.BlockSpec((4,), lambda i, j: 0)])
+    with self.assertRaisesRegex(
+        TypeError,
+        "missing 2 required positional arguments: 'i' and 'j'"):
+      f(a)
+
+  def test_pallas_call_index_map_wrong_number_of_results(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=a,
+                         in_specs=[pl.BlockSpec((4,), lambda: (0, 0))])
+    with self.assertRaisesRegex(
+        ValueError,
+        "Index map for input\\[0\\] must return 1 values to match .*Currently returning 2 values."):
+      f(a)
+
+  def test_pallas_call_out_specs_mismatch_shape(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=[a, a],
+                         out_specs=[pl.BlockSpec((6,), lambda i: i)])
+    with self.assertRaisesRegex(
+        ValueError,
+        re.compile("Pytree for `out_specs` and `out_shape` do not match. There are 1 mismatches, including:"
+         ".* `out_specs` is a tuple of length 1 but `out_shape` is a tuple of length 2.*", re.DOTALL)):
+      f(a)
+
+
+  def test_pallas_call_block_shape_ndim_mismatch(self):
+    a = np.arange(256, dtype=np.int32)
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=[a],
+                         in_specs=[pl.BlockSpec((1, 1), lambda: (0, 0))])
+    with self.assertRaisesRegex(
+        ValueError,
+        "Block shape for input\\[0\\] .* must have the same number of dimensions as the "
+        "array shape"):
+
+      f(a)
+
+    f = self.pallas_call(lambda x_ref, o1_ref: None,
+                         out_shape=[a],
+                         out_specs=[pl.BlockSpec((1, 1), lambda: 0)])
+    with self.assertRaisesRegex(
+        ValueError,
+        "Block shape for output\\[0\\] .* must have the same number of dimensions as the "
+        "array shape"):
+      f(a)
+
+
+class ApiErrorInterpreterTest(ApiErrorTest):
   INTERPRET = True
 
 
@@ -979,182 +1107,6 @@ class PallasCallAutodifferentiationTest(PallasTest):
 
 
 class PallasCallAutodifferentiationInterpreterTest(PallasCallAutodifferentiationTest):
-  INTERPRET = True
-
-  def setUp(self):
-    super().setUp()
-    if jtu.test_device_matches(["cpu"]) and jax.config.x64_enabled:
-      # TODO: assertion failures on CPU in 64-bit mode
-      self.skipTest("On CPU the test works only in 32-bit mode")
-
-
-class PallasCallVmapTest(PallasTest):
-
-  def setUp(self):
-    super().setUp()
-    if jtu.test_device_matches(["tpu"]):
-      # TODO: most tests fail on TPU in non-interpreter mode
-      self.skipTest("On TPU the test works only in interpret mode")
-
-  def test_vmap_of_simple_kernel(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-    )
-    def add_one(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-    out = jax.vmap(add_one)(jnp.arange(8))
-    out_ref = jnp.arange(1, 9)
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_vmap_of_simple_kernel_with_in_axes_None(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-    )
-    def add(x_ref, y_ref, o_ref):
-      o_ref[()] = x_ref[()] + y_ref[()]
-    out = jax.vmap(add, in_axes=(0, None))(jnp.arange(8), 1)
-    out_ref = jnp.arange(1, 9)
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_double_vmap_of_simple_kernel(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-    )
-    def add_one(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-    out = jax.vmap(jax.vmap(add_one))(jnp.arange(8).reshape((4, 2)))
-    out_ref = jnp.arange(1, 9).reshape((4, 2))
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_quadruple_vmap_of_simple_kernel(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-    )
-    def add_one(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-    out = jax.vmap(jax.vmap(jax.vmap(jax.vmap(add_one))))(
-        jnp.arange(15 * 8).reshape((5, 3, 4, 2)))
-    out_ref = jnp.arange(1, 15 * 8 + 1).reshape((5, 3, 4, 2))
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_quadruple_vmap_of_batched_kernel(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((7,), jnp.int32),
-        grid=(7,))
-    def add_one(x_ref, o_ref):
-      i = pl.program_id(0)
-      o_ref[i] = x_ref[i] + 1
-    out = jax.vmap(jax.vmap(jax.vmap(jax.vmap(add_one))))(
-        jnp.arange(15 * 8 * 7).reshape((5, 3, 4, 2, 7)))
-    out_ref = jnp.arange(1, 15 * 8 * 7 + 1).reshape((5, 3, 4, 2, 7))
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_vmap_of_slicing_kernel(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
-        grid=(2,))
-    def add_one(x_ref, o_ref):
-      i = pl.program_id(0)
-      o_ref[i] = x_ref[i] + 1
-    out = jax.vmap(add_one)(jnp.arange(8).reshape((4, 2)))
-    out_ref = jnp.arange(1, 9).reshape((4, 2))
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_vmap_of_kernel_with_input_output_aliases(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-        input_output_aliases={1:0},
-        grid=())
-    def add(x_ref, _, o_ref):
-      o_ref[()] = x_ref[()] + o_ref[()] + 1
-    out = jax.vmap(add, in_axes=(0, None))(jnp.arange(8), 1)
-    out_ref = jnp.arange(2, 10)
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_vmap_of_kernel_with_input_output_aliases_different_axes(self):
-    @functools.partial(
-        self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((4,), jnp.int32),
-        input_output_aliases={0: 0},
-        grid=(),
-    )
-    def add(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-
-    out = jax.vmap(add, in_axes=1)(jnp.arange(8).reshape((4, 2)))
-    out_ref = jnp.arange(1, 9).reshape((4, 2)).swapaxes(0, 1)
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_vmap_of_slicing_kernel_different_axes(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
-        grid=(2,))
-    def add_one(x_ref, o_ref):
-      i = pl.program_id(0)
-      o_ref[i] = x_ref[i] + 1
-    add_one_ref = lambda x: x + 1
-    x = jnp.arange(8).reshape((2, 4))
-
-    out = jax.vmap(add_one, in_axes=1, out_axes=1)(x)
-    out_ref = jax.vmap(add_one_ref, in_axes=1, out_axes=1)(x)
-    np.testing.assert_allclose(out, out_ref)
-
-    out = jax.vmap(add_one, in_axes=1, out_axes=0)(x)
-    out_ref = jax.vmap(add_one_ref, in_axes=1, out_axes=0)(x)
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_double_vmap_of_slicing_kernel_different_axes(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
-        grid=(4,))
-    def sin(x_ref, o_ref):
-      i = pl.program_id(0)
-      o_ref[i] = jnp.sin(x_ref[i])
-    sin_ref = jnp.sin
-    x = jnp.arange(64.).reshape((8, 4, 2))
-
-    out = jax.vmap(jax.vmap(sin, in_axes=1), in_axes=0)(x)
-    out_ref = jax.vmap(jax.vmap(sin_ref, in_axes=1), in_axes=0)(x)
-    np.testing.assert_allclose(out, out_ref, atol=1e-3, rtol=1e-3)
-
-  @jtu.skip_on_flag("jax_skip_slow_tests", True)
-  def test_small_large_vmap(self):
-    # Catches https://github.com/google/jax/issues/18361
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
-        grid=(2,))
-    def add_one(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-
-    add_one = jax.vmap(jax.vmap(add_one))
-    add_one_ref = lambda x: x + 1
-
-    x = random.randint(random.key(0), (4, 65536, 2), 0, 10000)
-
-    out = add_one(x)
-    out_ref = add_one_ref(x)
-
-    np.testing.assert_allclose(out, out_ref)
-
-  def test_small_small_large_vmap(self):
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
-        grid=(2,))
-    def add_one(x_ref, o_ref):
-      o_ref[()] = x_ref[()] + 1
-
-    add_one = jax.vmap(jax.vmap(jax.vmap(add_one)))
-    add_one_ref = lambda x: x + 1
-
-    x = random.randint(random.key(0), (2, 2, 65536, 2), 0, 10000)
-
-    out = add_one(x)
-    out_ref = add_one_ref(x)
-
-    np.testing.assert_allclose(out, out_ref)
-
-
-class PallasCallVmapInterpreterTest(PallasCallVmapTest):
   INTERPRET = True
 
   def setUp(self):
