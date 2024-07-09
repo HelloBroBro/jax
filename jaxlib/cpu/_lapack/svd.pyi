@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Note: import <name> as <name> is required for names to be exported.
-# See PEP 484 & https://github.com/google/jax/issues/7570
+import enum
+from typing import ClassVar
 
-from jax._src.custom_partitioning import (
-    custom_partitioning as custom_partitioning,
-    custom_partitioning_p as custom_partitioning_p,
-)
+
+class ComputationMode(enum.Enum):
+  kComputeFullUVt: ClassVar[ComputationMode]
+  kComputeMinUVt: ClassVar[ComputationMode]
+  kNoComputeUVt: ClassVar[ComputationMode]

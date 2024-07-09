@@ -209,6 +209,7 @@ py_library_providing_imports_info(
         "_src/checkify.py",
         "_src/custom_batching.py",
         "_src/custom_derivatives.py",
+        "_src/custom_partitioning.py",
         "_src/custom_transpose.py",
         "_src/debugging.py",
         "_src/dispatch.py",
@@ -231,6 +232,7 @@ py_library_providing_imports_info(
     ] + glob(
         [
             "*.py",
+            "_src/cudnn/**/*.py",
             "_src/debugger/**/*.py",
             "_src/extend/**/*.py",
             "_src/image/**/*.py",
@@ -940,6 +942,7 @@ pytype_strict_library(
         "_src/clusters/__init__.py",
         "_src/clusters/cloud_tpu_cluster.py",
         "_src/clusters/cluster.py",
+        "_src/clusters/mpi4py_cluster.py",
         "_src/clusters/ompi_cluster.py",
         "_src/clusters/slurm_cluster.py",
         "_src/distributed.py",
@@ -1126,17 +1129,4 @@ pytype_library(
     srcs = ["experimental/rnn.py"],
     visibility = ["//visibility:public"],
     deps = [":jax"],
-)
-
-pytype_library(
-    name = "fused_attention_stablehlo",
-    srcs = [
-        "_src/cudnn/__init__.py",
-        "_src/cudnn/fused_attention_stablehlo.py",
-    ],
-    visibility = [":internal"],
-    deps = [
-        ":experimental",
-        ":jax",
-    ],
 )

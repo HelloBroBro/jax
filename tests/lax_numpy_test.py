@@ -592,6 +592,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       dtype=number_dtypes,
   )
   @jax.default_matmul_precision("float32")
+  @jax.numpy_rank_promotion('allow')  # This test explicitly exercises implicit rank promotion.
   def testVecdot(self, lhs_batch, rhs_batch, axis_size, axis, dtype):
     # Construct vecdot-compatible shapes.
     size = min(len(lhs_batch), len(rhs_batch))
@@ -4254,19 +4255,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       actual = jnp.take_along_axis(x, indices, axis=-1 if axis is NO_VALUE else axis)
     self.assertArraysEqual(actual, expected)
 
-  @jtu.sample_product(
-    [{'shape': shape, 'axis': axis, 'kth': kth}
-     for shape in nonzerodim_shapes
-     for axis in range(-len(shape), len(shape))
-     for kth in range(-shape[axis], shape[axis])],
-    dtype=default_dtypes,
-  )
-  def testPartition(self, shape, dtype, axis, kth):
-    rng = jtu.rand_default(self.rng())
-    arg = rng(shape, dtype)
-    jnp_output = jnp.partition(arg, axis=axis, kth=kth)
-    np_output = np.partition(arg, axis=axis, kth=kth)
-
+  def _assertSamePartionedArrays(self, jnp_output, np_output, axis, kth, shape):
     # Assert that pivot point is equal:
     self.assertArraysEqual(
       lax.index_in_dim(jnp_output, axis=axis, index=kth),
@@ -4279,6 +4268,34 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self.assertArraysEqual(
       lax.sort(lax.slice_in_dim(jnp_output, start_index=kth + 1, limit_index=shape[axis], axis=axis), dimension=axis),
       lax.sort(lax.slice_in_dim(np_output, start_index=kth + 1, limit_index=shape[axis], axis=axis), dimension=axis))
+
+  @jtu.sample_product(
+    [{'shape': shape, 'axis': axis, 'kth': kth}
+     for shape in nonzerodim_shapes
+     for axis in range(-len(shape), len(shape))
+     for kth in range(-shape[axis], shape[axis])],
+    dtype=default_dtypes,
+  )
+  def testPartition(self, shape, dtype, axis, kth):
+    rng = jtu.rand_default(self.rng())
+    arg = rng(shape, dtype)
+    jnp_output = jnp.partition(arg, axis=axis, kth=kth)
+    np_output = np.partition(arg, axis=axis, kth=kth)
+    self._assertSamePartionedArrays(jnp_output, np_output, axis, kth, shape)
+
+  @jtu.sample_product(
+    kth=range(10),
+    dtype=unsigned_dtypes,
+  )
+  def testPartitionUnsignedWithZeros(self, kth, dtype):
+    # https://github.com/google/jax/issues/22137
+    max_val = np.iinfo(dtype).max
+    arg = jnp.array([[6, max_val, 0, 4, 3, 1, 0, 7, 5, 2]], dtype=dtype)
+    axis = -1
+    shape = arg.shape
+    jnp_output = jnp.partition(arg, axis=axis, kth=kth)
+    np_output = np.partition(arg, axis=axis, kth=kth)
+    self._assertSamePartionedArrays(jnp_output, np_output, axis, kth, shape)
 
   @jtu.sample_product(
     [{'shape': shape, 'axis': axis, 'kth': kth}
@@ -4305,19 +4322,33 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         getvals = jax.vmap(getvals, in_axes=ax, out_axes=ax)
     jnp_values = getvals(arg, jnp_output)
     np_values = getvals(arg, np_output)
+    self._assertSamePartionedArrays(jnp_values, np_values, axis, kth, shape)
 
-    # Assert that pivot point is equal:
-    self.assertArraysEqual(
-      lax.index_in_dim(jnp_values, axis=axis, index=kth),
-      lax.index_in_dim(np_values, axis=axis, index=kth))
+  @jtu.sample_product(
+    kth=range(10),
+    dtype=unsigned_dtypes,
+  )
+  def testArgpartitionUnsignedWithZeros(self, kth, dtype):
+    # https://github.com/google/jax/issues/22137
+    max_val = np.iinfo(dtype).max
+    arg = jnp.array([[6, max_val, 0, 4, 3, 1, 0, 7, 5, 2, 3]], dtype=dtype)
+    axis = -1
+    shape = arg.shape
+    jnp_output = jnp.argpartition(arg, axis=axis, kth=kth)
+    np_output = np.argpartition(arg, axis=axis, kth=kth)
 
-    # Assert remaining values are correctly partitioned:
-    self.assertArraysEqual(
-      lax.sort(lax.slice_in_dim(jnp_values, start_index=0, limit_index=kth, axis=axis), dimension=axis),
-      lax.sort(lax.slice_in_dim(np_values, start_index=0, limit_index=kth, axis=axis), dimension=axis))
-    self.assertArraysEqual(
-      lax.sort(lax.slice_in_dim(jnp_values, start_index=kth + 1, limit_index=shape[axis], axis=axis), dimension=axis),
-      lax.sort(lax.slice_in_dim(np_values, start_index=kth + 1, limit_index=shape[axis], axis=axis), dimension=axis))
+    # Assert that all indices are present
+    self.assertArraysEqual(jnp.sort(jnp_output, axis), np.sort(np_output, axis), check_dtypes=False)
+
+    # Because JAX & numpy may treat duplicates differently, we must compare values
+    # rather than indices.
+    getvals = lambda x, ind: x[ind]
+    for ax in range(arg.ndim):
+      if ax != range(arg.ndim)[axis]:
+        getvals = jax.vmap(getvals, in_axes=ax, out_axes=ax)
+    jnp_values = getvals(arg, jnp_output)
+    np_values = getvals(arg, np_output)
+    self._assertSamePartionedArrays(jnp_values, np_values, axis, kth, shape)
 
   @jtu.sample_product(
     [dict(shifts=shifts, axis=axis)

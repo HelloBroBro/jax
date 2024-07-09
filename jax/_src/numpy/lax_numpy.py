@@ -2250,48 +2250,65 @@ def array_split(ary: ArrayLike, indices_or_sections: int | Sequence[int] | Array
   return _split("array_split", ary, indices_or_sections, axis=axis)
 
 
-_DEPRECATED_CLIP_ARG = DeprecatedArg()
-@util.implements(
-  np.clip,
-  skip_params=['a', 'a_min'],
-  extra_params=_dedent("""
-    x : array_like
-        Array containing elements to clip.
-    min : array_like, optional
-        Minimum value. If ``None``, clipping is not performed on the
-        corresponding edge. The value of ``min`` is broadcast against x.
-    max : array_like, optional
-        Maximum value. If ``None``, clipping is not performed on the
-        corresponding edge. The value of ``max`` is broadcast against x.
-""")
-)
 @jit
 def clip(
-  x: ArrayLike | None = None, # Default to preserve backwards compatability
+  arr: ArrayLike | None = None,
   /,
   min: ArrayLike | None = None,
   max: ArrayLike | None = None,
   *,
-  a: ArrayLike | DeprecatedArg = _DEPRECATED_CLIP_ARG,
-  a_min: ArrayLike | None | DeprecatedArg = _DEPRECATED_CLIP_ARG,
-  a_max: ArrayLike | None | DeprecatedArg = _DEPRECATED_CLIP_ARG
+  a: ArrayLike | DeprecatedArg = DeprecatedArg(),
+  a_min: ArrayLike | None | DeprecatedArg = DeprecatedArg(),
+  a_max: ArrayLike | None | DeprecatedArg = DeprecatedArg()
 ) -> Array:
+  """Clip array values to a specified range.
+
+  JAX implementation of :func:`numpy.clip`.
+
+  Args:
+    arr: N-dimensional array to be clipped.
+    min: optional minimum value of the clipped range; if ``None`` (default) then
+      result will not be clipped to any minimum value. If specified, it should be
+      broadcast-compatible with ``arr`` and ``max``.
+    max: optional maximum value of the clipped range; if ``None`` (default) then
+      result will not be clipped to any maximum value. If specified, it should be
+      broadcast-compatible with ``arr`` and ``min``.
+    a: deprecated alias of the ``arr`` argument.  Will result in a
+      :class:`DeprecationWarning` if used.
+    a_min: deprecated alias of the ``min`` argument. Will result in a
+      :class:`DeprecationWarning` if used.
+    a_max: deprecated alias of the ``max`` argument. Will result in a
+      :class:`DeprecationWarning` if used.
+
+  Returns:
+    An array containing values from ``arr``, with values smaller than ``min`` set
+    to ``min``, and values larger than ``max`` set to ``max``.
+
+  See also:
+    - :func:`jax.numpy.minimum`: Compute the element-wise minimum value of two arrays.
+    - :func:`jax.numpy.maximum`: Compute the element-wise maximum value of two arrays.
+
+  Examples:
+    >>> arr = jnp.array([0, 1, 2, 3, 4, 5, 6, 7])
+    >>> jnp.clip(arr, 2, 5)
+    Array([2, 2, 2, 3, 4, 5, 5, 5], dtype=int32)
+  """
   # TODO(micky774): deprecated 2024-4-2, remove after deprecation expires.
-  x = a if not isinstance(a, DeprecatedArg) else x
-  if x is None:
+  arr = a if not isinstance(a, DeprecatedArg) else arr
+  if arr is None:
     raise ValueError("No input was provided to the clip function.")
   min = a_min if not isinstance(a_min, DeprecatedArg) else min
   max = a_max if not isinstance(a_max, DeprecatedArg) else max
   if any(not isinstance(t, DeprecatedArg) for t in (a, a_min, a_max)):
     warnings.warn(
-      "Passing arguments 'a', 'a_min', or 'a_max' to jax.numpy.clip is "
-      "deprecated. Please use 'x', 'min', and 'max' respectively instead.",
+      "Passing arguments 'a', 'a_min' or 'a_max' to jax.numpy.clip is "
+      "deprecated. Please use 'arr', 'min' or 'max' respectively instead.",
       DeprecationWarning,
       stacklevel=2,
     )
 
-  util.check_arraylike("clip", x)
-  if any(jax.numpy.iscomplexobj(t) for t in (x, min, max)):
+  util.check_arraylike("clip", arr)
+  if any(jax.numpy.iscomplexobj(t) for t in (arr, min, max)):
     # TODO(micky774): Deprecated 2024-4-2, remove after deprecation expires.
     warnings.warn(
       "Clip received a complex value either through the input or the min/max "
@@ -2302,10 +2319,10 @@ def clip(
       DeprecationWarning, stacklevel=2,
     )
   if min is not None:
-    x = ufuncs.maximum(min, x)
+    arr = ufuncs.maximum(min, arr)
   if max is not None:
-    x = ufuncs.minimum(max, x)
-  return asarray(x)
+    arr = ufuncs.minimum(max, arr)
+  return asarray(arr)
 
 @util.implements(np.around, skip_params=['out'])
 @partial(jit, static_argnames=('decimals',))
@@ -2472,15 +2489,14 @@ def nonzero(a: ArrayLike, *, size: int | None = None,
     raise ValueError("Calling nonzero on 0d arrays is not allowed. "
                      "Use jnp.atleast_1d(scalar).nonzero() instead.")
   mask = arr if arr.dtype == bool else (arr != 0)
-  calculated_size = mask.sum() if size is None else size
-  calculated_size = core.concrete_dim_or_error(calculated_size,
+  calculated_size_ = mask.sum() if size is None else size
+  calculated_size: int = core.concrete_dim_or_error(calculated_size_,
     "The size argument of jnp.nonzero must be statically specified "
     "to use jnp.nonzero within JAX transformations.")
   if arr.size == 0 or calculated_size == 0:
     return tuple(zeros(calculated_size, int) for dim in arr.shape)
   flat_indices = reductions.cumsum(
-      bincount(reductions.cumsum(mask),
-               length=calculated_size))  # type: ignore[arg-type]
+      bincount(reductions.cumsum(mask), length=calculated_size))
   strides: np.ndarray = (np.cumprod(arr.shape[::-1])[::-1] // arr.shape).astype(int_)
   out = tuple((flat_indices // stride) % size for stride, size in zip(strides, arr.shape))
   if fill_value is not None:
@@ -3980,8 +3996,8 @@ def identity(n: DimSize, dtype: DTypeLike | None = None) -> Array:
   return eye(n, dtype=dtype)
 
 
-def arange(start: DimSize, stop: DimSize | None = None,
-           step: DimSize | None = None, dtype: DTypeLike | None = None,
+def arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
+           step: ArrayLike | None = None, dtype: DTypeLike | None = None,
            *, device: xc.Device | Sharding | None = None) -> Array:
   """Create an array of evenly-spaced values.
 
@@ -4059,8 +4075,8 @@ def arange(start: DimSize, stop: DimSize | None = None,
   return output
 
 
-def _arange(start: DimSize, stop: DimSize | None = None,
-           step: DimSize | None = None, dtype: DTypeLike | None = None) -> Array:
+def _arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
+            step: ArrayLike | None = None, dtype: DTypeLike | None = None) -> Array:
   dtypes.check_user_dtype_supported(dtype, "arange")
   if not config.dynamic_shapes.value:
     util.check_arraylike("arange", start)
@@ -4092,11 +4108,11 @@ def _arange(start: DimSize, stop: DimSize | None = None,
     if (not dtypes.issubdtype(start_dtype, np.integer) and
         not dtypes.issubdtype(start_dtype, dtypes.extended)):
       ceil_ = ufuncs.ceil if isinstance(start, core.Tracer) else np.ceil
-      start = ceil_(start).astype(int)  # type: ignore
-    return lax.iota(dtype, start)
+      start = ceil_(start).astype(int)  # type: ignore[operator]
+    return lax.iota(dtype, start)  # type: ignore[arg-type]
   else:
     if step is None and start == 0 and stop is not None:
-      return lax.iota(dtype, np.ceil(stop).astype(int))
+      return lax.iota(dtype, np.ceil(stop).astype(int))  # type: ignore[arg-type]
     return array(np.arange(start, stop=stop, step=step, dtype=dtype))
 
 
@@ -6238,14 +6254,6 @@ def _nanargmin(a, axis: int | None = None, keepdims : bool = False):
   return where(reductions.all(nan_mask, axis=axis, keepdims=keepdims), -1, res)
 
 
-@util.implements(np.sort, extra_params="""
-stable : bool, default=True
-    Specify whether to use a stable sort.
-descending : bool, default=False
-    Specify whether to do a descending sort.
-kind : deprecated; specify sort algorithm using stable=True or stable=False
-order : not supported
-""")
 @partial(jit, static_argnames=('axis', 'kind', 'order', 'stable', 'descending'))
 def sort(
     a: ArrayLike,
@@ -6256,6 +6264,43 @@ def sort(
     stable: bool = True,
     descending: bool = False,
 ) -> Array:
+  """Return a sorted copy of an array.
+
+  JAX implementation of :func:`numpy.sort`.
+
+  Args:
+    a: array to sort
+    axis: integer axis along which to sort. Defaults to ``-1``, i.e. the last
+      axis. If ``None``, then ``a`` is flattened before being sorted.
+    stable: boolean specifying whether a stable sort should be used. Default=True.
+    descending: boolean specifying whether to sort in descending order. Default=False.
+    kind: deprecated; instead specify sort algorithm using stable=True or stable=False.
+    order: not supported by JAX
+
+  Returns:
+    Sorted array of shape ``a.shape`` (if ``axis`` is an integer) or of shape
+    ``(a.size,)`` (if ``axis`` is None).
+
+  Examples:
+    Simple 1-dimensional sort
+
+    >>> x = jnp.array([1, 3, 5, 4, 2, 1])
+    >>> jnp.sort(x)
+    Array([1, 1, 2, 3, 4, 5], dtype=int32)
+
+    Sort along the last axis of an array:
+
+    >>> x = jnp.array([[2, 1, 3],
+    ...                [4, 3, 6]])
+    >>> jnp.sort(x, axis=1)
+    Array([[1, 2, 3],
+           [3, 4, 6]], dtype=int32)
+
+  See also:
+    - :func:`jax.numpy.argsort`: return indices of sorted values.
+    - :func:`jax.numpy.lexsort`: lexicographical sort of multiple arrays.
+    - :func:`jax.lax.sort`: lower-level function wrapping XLA's Sort operator.
+  """
   util.check_arraylike("sort", a)
   if kind is not None:
     raise TypeError("'kind' argument to sort is not supported. Use"
@@ -6297,14 +6342,6 @@ def lexsort(keys: Array | np.ndarray | Sequence[ArrayLike], axis: int = -1) -> A
   return lax.sort((*key_arrays[::-1], iota), dimension=axis, num_keys=len(key_arrays))[-1]
 
 
-@util.implements(np.argsort, extra_params="""
-stable : bool, default=True
-    Specify whether to use a stable sort.
-descending : bool, default=False
-    Specify whether to do a descending sort.
-kind : deprecated; specify sort algorithm using stable=True or stable=False
-order : not supported
-    """)
 @partial(jit, static_argnames=('axis', 'kind', 'order', 'stable', 'descending'))
 def argsort(
     a: ArrayLike,
@@ -6315,6 +6352,51 @@ def argsort(
     stable: bool = True,
     descending: bool = False,
 ) -> Array:
+  """Return indices that sort an array.
+
+  JAX implementation of :func:`numpy.argsort`.
+
+  Args:
+    a: array to sort
+    axis: integer axis along which to sort. Defaults to ``-1``, i.e. the last
+      axis. If ``None``, then ``a`` is flattened before being sorted.
+    stable: boolean specifying whether a stable sort should be used. Default=True.
+    descending: boolean specifying whether to sort in descending order. Default=False.
+    kind: deprecated; instead specify sort algorithm using stable=True or stable=False.
+    order: not supported by JAX
+
+  Returns:
+    Array of indices that sort an array. Returned array will be of shape ``a.shape``
+    (if ``axis`` is an integer) or of shape ``(a.size,)`` (if ``axis`` is None).
+
+  Examples:
+    Simple 1-dimensional sort
+
+    >>> x = jnp.array([1, 3, 5, 4, 2, 1])
+    >>> indices = jnp.argsort(x)
+    >>> indices
+    Array([0, 5, 4, 1, 3, 2], dtype=int32)
+    >>> x[indices]
+    Array([1, 1, 2, 3, 4, 5], dtype=int32)
+
+    Sort along the last axis of an array:
+
+    >>> x = jnp.array([[2, 1, 3],
+    ...                [6, 4, 3]])
+    >>> indices = jnp.argsort(x, axis=1)
+    >>> indices
+    Array([[1, 0, 2],
+           [2, 1, 0]], dtype=int32)
+    >>> jnp.take_along_axis(x, indices, axis=1)
+    Array([[1, 2, 3],
+           [3, 4, 6]], dtype=int32)
+
+
+  See also:
+    - :func:`jax.numpy.sort`: return sorted values directly.
+    - :func:`jax.numpy.lexsort`: lexicographical sort of multiple arrays.
+    - :func:`jax.lax.sort`: lower-level function wrapping XLA's Sort operator.
+  """
   util.check_arraylike("argsort", a)
   arr = asarray(a)
   if kind is not None:
@@ -6400,7 +6482,11 @@ def partition(a: ArrayLike, kth: int, axis: int = -1) -> Array:
   kth = _canonicalize_axis(kth, arr.shape[axis])
 
   arr = swapaxes(arr, axis, -1)
-  bottom = -lax.top_k(-arr, kth + 1)[0]
+  if dtypes.isdtype(arr.dtype, "unsigned integer"):
+    # Here, we apply a trick to handle correctly 0 values for unsigned integers
+    bottom = -lax.top_k(-(arr + 1), kth + 1)[0] - 1
+  else:
+    bottom = -lax.top_k(-arr, kth + 1)[0]
   top = lax.top_k(arr, arr.shape[-1] - kth - 1)[0]
   out = lax.concatenate([bottom, top], dimension=arr.ndim - 1)
   return swapaxes(out, -1, axis)
@@ -6467,7 +6553,11 @@ def argpartition(a: ArrayLike, kth: int, axis: int = -1) -> Array:
   kth = _canonicalize_axis(kth, arr.shape[axis])
 
   arr = swapaxes(arr, axis, -1)
-  bottom_ind = lax.top_k(-arr, kth + 1)[1]
+  if dtypes.isdtype(arr.dtype, "unsigned integer"):
+    # Here, we apply a trick to handle correctly 0 values for unsigned integers
+    bottom_ind = lax.top_k(-(arr + 1), kth + 1)[1]
+  else:
+    bottom_ind = lax.top_k(-arr, kth + 1)[1]
 
   # To avoid issues with duplicate values, we compute the top indices via a proxy
   set_to_zero = lambda a, i: a.at[i].set(0)
