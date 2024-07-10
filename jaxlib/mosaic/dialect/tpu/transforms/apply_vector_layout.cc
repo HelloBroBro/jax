@@ -188,9 +188,12 @@ FailureOr<Value> getInternalScratch(RewriteContext &ctx, OpBuilder &builder,
   if (sublane_count > ctx.max_sublanes_in_scratch) {
     return failure();
   }
+  // We can omit tpu_tiling_flags here because, for internal scratch, the
+  // tiling does not matter (its shape is (N, 128)).
   FAILUREOR_ASSIGN_OR_RETURN(
       MemRefType scratch_ref_ty,
-      inferMemref(MemRefType::get(shape, elem_ty), ctx.hardware_generation));
+      inferMemref(MemRefType::get(shape, elem_ty), ctx.hardware_generation,
+                  /*tpu_tiling_flags=*/{}));
   return builder.create<tpu::GetInternalScratchOp>(loc, scratch_ref_ty)
       .getResult();
 }
@@ -503,11 +506,14 @@ FailureOr<BlockArgument> appendConstant(RewriteContext &ctx,
     return ctx.func.emitOpError(
         "Not implemented: function has scratch_operands");
   }
+  // We can omit tpu_tiling_flags here since we invoke inferMemref only for
+  // constant operands which are kernel parameters that will have their layouts
+  // overridden before the pass pipeline runs anyway.
   FAILUREOR_ASSIGN_OR_RETURN(
       MemRefType arg_type,
       inferMemref(
           MemRefType::get(value_ty.getShape(), value_ty.getElementType()),
-          ctx.hardware_generation));
+          ctx.hardware_generation, /*tpu_tiling_flags=*/{}));
   const BlockArgument argument =
       entry_block.insertArgument(entry_block.getNumArguments() - 1, arg_type,
                                  UnknownLoc::get(ctx.getMLIRContext()));
@@ -3544,6 +3550,11 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
           builder.getF32Type(),
           APFloat::getInf(APFloat::IEEEsingle(), /*Negative=*/true));
     } break;
+    case vector::CombiningKind::MINIMUMF: {
+      neutral = builder.getFloatAttr(
+          builder.getF32Type(),
+          APFloat::getInf(APFloat::IEEEsingle(), /*Negative=*/false));
+    } break;
     default:
       return multi_reduction_op.emitOpError(
           "Not implemented: unsupported kind");
@@ -3636,6 +3647,9 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
     case vector::CombiningKind::MAXIMUMF:
       tpu_kind = tpu::ReductionKind::MAX;
       break;
+    case vector::CombiningKind::MINIMUMF:
+      tpu_kind = tpu::ReductionKind::MIN;
+      break;
     default:
       return multi_reduction_op.emitOpError(
           "Not implemented: unsupported reduction kind");
@@ -3690,6 +3704,10 @@ LogicalResult vector_multi_reduction_rule(RewriteContext &ctx, Operation &op,
                     break;
                   case tpu::ReductionKind::MAX:
                     acc_vreg = builder.create<arith::MaximumFOp>(
+                        vreg.getLoc(), *acc_vreg, vreg);
+                    break;
+                  case tpu::ReductionKind::MIN:
+                    acc_vreg = builder.create<arith::MinimumFOp>(
                         vreg.getLoc(), *acc_vreg, vreg);
                     break;
                 }

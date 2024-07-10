@@ -158,7 +158,8 @@ class TPU_Op<string mnemonic, list<Trait> traits = []> :
 
 def TPU_ReductionKind : I32EnumAttr<"ReductionKind", "Reduction kind", [
   I32EnumAttrCase<"SUM", 0, "sum">,
-  I32EnumAttrCase<"MAX", 1, "max">
+  I32EnumAttrCase<"MAX", 1, "max">,
+  I32EnumAttrCase<"MIN", 2, "min">
 ]> {
     let genSpecializedAttr = 0;
     let cppNamespace = "::mlir::tpu";
@@ -679,11 +680,12 @@ def InferMemRefLayoutPass : Pass<"tpu-infer-memref-layout", "::mlir::func::FuncO
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
   ];
-  let constructor = "::mlir::tpu::createInferMemRefLayoutPass(-1)";
+  let constructor = "::mlir::tpu::createInferMemRefLayoutPass()";
   let options = [
     // If hardware_generation is not set, the default value of -1 will crash on
     // runOnOperation.
     Option<"hardware_generation", "hardware-generation", "int", /*default=*/"-1", "">,
+    Option<"tpu_tiling_flags", "tpu-tiling-flags", "::mlir::tpu::TpuTilingFlags", /*default=*/"::mlir::tpu::TpuTilingFlags{}", "">,
   ];
 }
 
