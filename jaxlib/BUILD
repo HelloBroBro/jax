@@ -124,6 +124,20 @@ cc_library(
 )
 
 cc_library(
+    name = "ffi_helpers",
+    hdrs = ["ffi_helpers.h"],
+    features = ["-use_header_modules"],
+    deps = [
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/ffi/api:ffi",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "kernel_nanobind_helpers",
     hdrs = ["kernel_nanobind_helpers.h"],
     copts = [
@@ -133,6 +147,7 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         ":kernel_helpers",
+        "@xla//xla/ffi/api:c_api",
         "@xla//xla/tsl/python/lib/core:numpy",
         "@com_google_absl//absl/base",
         "@nanobind",

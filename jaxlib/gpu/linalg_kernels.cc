@@ -13,84 +13,84 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "jaxlib/gpu/lu_pivot_kernels.h"
+#include "jaxlib/gpu/linalg_kernels.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 
 #include "absl/algorithm/container.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "jaxlib/ffi_helpers.h"
 #include "jaxlib/gpu/gpu_kernel_helpers.h"
 #include "jaxlib/gpu/vendor.h"
-#include "xla/ffi/api/c_api.h"
+#include "jaxlib/kernel_helpers.h"
 #include "xla/ffi/api/ffi.h"
+#include "xla/service/custom_call_status.h"
 
 namespace jax {
 namespace JAX_GPU_NAMESPACE {
 
 namespace ffi = xla::ffi;
 
-template <typename T>
-inline absl::StatusOr<T> MaybeCastNoOverflow(
-    std::int64_t value, const std::string& source = __FILE__) {
-  if constexpr (sizeof(T) == sizeof(std::int64_t)) {
-    return value;
-  } else {
-    if (value > std::numeric_limits<T>::max()) [[unlikely]] {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "%s: Value (=%d) exceeds the maximum representable value of the "
-          "desired type",
-          source, value));
-    }
-    return static_cast<T>(value);
+namespace {
+absl::Status CholeskyUpdateImpl(gpuStream_t stream, void** buffers,
+                                const char* opaque, std::size_t opaque_len) {
+  auto s = UnpackDescriptor<CholeskyUpdateDescriptor>(opaque, opaque_len);
+  JAX_RETURN_IF_ERROR(s.status());
+  const CholeskyUpdateDescriptor& d = **s;
+  LaunchCholeskyUpdateKernel(stream, buffers, d);
+  JAX_RETURN_IF_ERROR(JAX_AS_STATUS(gpuGetLastError()));
+  return absl::OkStatus();
+}
+}  // namespace
+
+void CholeskyUpdate(gpuStream_t stream, void** buffers, const char* opaque,
+                    size_t opaque_len, XlaCustomCallStatus* status) {
+  auto s = CholeskyUpdateImpl(stream, buffers, opaque, opaque_len);
+  if (!s.ok()) {
+    std::string_view message = s.message();
+    XlaCustomCallStatusSetFailure(status, message.data(), message.length());
   }
 }
 
+namespace {
 ffi::Error LuPivotsToPermutationImpl(
     gpuStream_t stream, std::int32_t permutation_size,
     ffi::Buffer<ffi::DataType::S32> pivots,
     ffi::Result<ffi::Buffer<ffi::DataType::S32>> permutation) {
-#if XLA_FFI_LAZY_DECODED_BUFFER
   auto dims = pivots.dimensions();
-#else
-  auto dims = pivots.dimensions;
-#endif
 
   if (dims.size() < 1) {
     return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                       "pivots must have at least one dimension");
   }
-  auto maybe_pivot_size = MaybeCastNoOverflow<std::int32_t>(dims.back());
-  if (!maybe_pivot_size.ok()) {
-    return ffi::Error(
-        static_cast<XLA_FFI_Error_Code>(maybe_pivot_size.status().code()),
-        std::string(maybe_pivot_size.status().message()));
-  }
-  std::int32_t pivot_size = maybe_pivot_size.value();
+  FFI_ASSIGN_OR_RETURN(std::int32_t pivot_size,
+                       MaybeCastNoOverflow<std::int32_t>(dims.back()));
   std::int64_t batch_size = 1;
   if (dims.size() >= 2) {
     batch_size =
         absl::c_accumulate(dims.first(dims.size() - 1), 1, std::multiplies<>());
   }
-#if XLA_FFI_LAZY_DECODED_BUFFER
   LaunchLuPivotsToPermutationKernel(stream, batch_size, pivot_size,
                                     permutation_size, pivots.typed_data(),
                                     permutation->typed_data());
-#else
-  LaunchLuPivotsToPermutationKernel(stream, batch_size, pivot_size,
-                                    permutation_size, pivots.data,
-                                    permutation->data);
-#endif
-  if (auto status = JAX_AS_STATUS(gpuGetLastError()); !status.ok()) {
-    return ffi::Error(static_cast<XLA_FFI_Error_Code>(status.code()),
-                      std::string(status.message()));
-  }
+  FFI_RETURN_IF_ERROR_STATUS(JAX_AS_STATUS(gpuGetLastError()));
   return ffi::Error::Success();
 }
+}  // namespace
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(LuPivotsToPermutation, LuPivotsToPermutationImpl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<gpuStream_t>>()
+                                  .Attr<std::int32_t>("permutation_size")
+                                  .Arg<ffi::Buffer<ffi::DataType::S32>>()
+                                  .Ret<ffi::Buffer<ffi::DataType::S32>>());
 
 }  // namespace JAX_GPU_NAMESPACE
 }  // namespace jax
