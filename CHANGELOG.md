@@ -1,6 +1,8 @@
 # Change log
 
 Best viewed [here](https://jax.readthedocs.io/en/latest/changelog.html).
+For the changes specific to the experimental Pallas APIs,
+see {ref}`pallas-changelog`.
 
 <!--
 Remember to align the itemized text with the first line of an item within a list.
@@ -21,6 +23,8 @@ Remember to align the itemized text with the first line of an item within a list
   * {class}`jax.experimental.pallas.BlockSpec` now expects `block_shape` to
     be passed *before* `index_map`. The old argument order is deprecated and
     will be removed in a future release.
+  * Updated the repr of gpu devices to be more consistent
+    with TPUs/CPUs. For example, `cuda(id=0)` will now be `CudaDevice(id=0)`.
 * Deprecations
   * Removed a number of previously-deprecated internal APIs related to
     polymorphic shapes. From {mod}`jax.core`: removed `canonicalize_shape`,

@@ -1180,24 +1180,54 @@ def ediff1d(ary: ArrayLike, to_end: ArrayLike | None = None,
     result = concatenate((result, ravel(asarray(to_end, dtype=arr.dtype))))
   return result
 
-
 @util.implements(np.gradient, skip_params=['edge_order'])
-@partial(jit, static_argnames=('axis', 'edge_order'))
-def gradient(f: ArrayLike, *varargs: ArrayLike,
-             axis: int | Sequence[int] | None = None,
-             edge_order: int | None = None) -> Array | list[Array]:
+@partial(jit, static_argnames=("axis", "edge_order"))
+def gradient(
+    f: ArrayLike,
+    *varargs: ArrayLike,
+    axis: int | Sequence[int] | None = None,
+    edge_order: int | None = None,
+) -> Array | list[Array]:
+
   if edge_order is not None:
-    raise NotImplementedError("The 'edge_order' argument to jnp.gradient is not supported.")
-  a, *spacing = util.promote_args_inexact("gradient", f, *varargs)
+    raise NotImplementedError(
+        "The 'edge_order' argument to jnp.gradient is not supported."
+    )
+  a, *spacing = util.promote_dtypes_inexact(f, *varargs)
 
   def gradient_along_axis(a, h, axis):
     sliced = partial(lax.slice_in_dim, a, axis=axis)
-    a_grad = concatenate((
-      (sliced(1, 2) - sliced(0, 1)),  # upper edge
-      (sliced(2, None) - sliced(None, -2)) * 0.5,  # inner
-      (sliced(-1, None) - sliced(-2, -1)),  # lower edge
-    ), axis)
-    return a_grad / h
+    upper_edge = sliced(1, 2) - sliced(0, 1)
+    lower_edge = sliced(-1, None) - sliced(-2, -1)
+
+    if ndim(h) == 0:
+      inner = (sliced(2, None) - sliced(None, -2)) * 0.5 / h
+      lower_edge /= h
+      upper_edge /= h
+
+    elif ndim(h) == 1:
+      if len(h) != a.shape[axis]:
+        raise ValueError(
+            "Spacing arrays must have the same length as the "
+            "dimension along which the gradient is calculated."
+        )
+      h_shape = [1] * a.ndim
+      h_shape[axis] = len(h)
+      h = h.reshape(h_shape)
+      sliced_x = partial(lax.slice_in_dim, h, axis=axis)
+
+      upper_edge /= sliced_x(1, 2) - sliced_x(0, 1)
+      lower_edge /= sliced_x(-1, None) - sliced_x(-2, -1)
+      dx1 = sliced_x(1, -1) - sliced_x(0, -2)
+      dx2 = sliced_x(2, None) - sliced_x(1, -1)
+      a = -(dx2) / (dx1 * (dx1 + dx2))
+      b = (dx2 - dx1) / (dx1 * dx2)
+      c = dx1 / (dx2 * (dx1 + dx2))
+      inner = a * sliced(0, -2) + b * sliced(1, -1) + c * sliced(2, None)
+    else:
+      raise ValueError("Spacing arrays must be 1D arrays or scalars.")
+
+    return concatenate((upper_edge, inner, lower_edge), axis=axis)
 
   if axis is None:
     axis_tuple = tuple(range(a.ndim))
@@ -1218,9 +1248,6 @@ def gradient(f: ArrayLike, *varargs: ArrayLike,
     dx = list(spacing)
   else:
     TypeError(f"Invalid number of spacing arguments {len(spacing)} for {axis=}")
-
-  if ndim(dx[0]) != 0:
-    raise NotImplementedError("Non-constant spacing not implemented")
 
   a_grad = [gradient_along_axis(a, h, ax) for ax, h in zip(axis_tuple, dx)]
   return a_grad[0] if len(axis_tuple) == 1 else a_grad
@@ -4437,19 +4464,71 @@ def indices(dimensions: Sequence[int], dtype: DTypeLike = int32,
   return stack(output, 0) if output else array([], dtype=dtype)
 
 
-_TOTAL_REPEAT_LENGTH_DOC = """\
-JAX adds the optional `total_repeat_length` parameter which specifies the total
-number of repeat, and defaults to sum(repeats). It must be specified for repeat
-to be compilable. If `sum(repeats)` is larger than the specified
-`total_repeat_length` the remaining values will be discarded. In the case of
-`sum(repeats)` being smaller than the specified target length, the final value
-will be repeated.
-"""
-
-
-@util.implements(np.repeat, lax_description=_TOTAL_REPEAT_LENGTH_DOC)
 def repeat(a: ArrayLike, repeats: ArrayLike, axis: int | None = None, *,
            total_repeat_length: int | None = None) -> Array:
+  """Construct an array from repeated elements.
+
+  JAX implementation of :func:`numpy.repeat`.
+
+  Args:
+    a: N-dimensional array
+    repeats: 1D integer array specifying the number of repeats. Must match the
+      length of the repeated axis.
+    axis: integer specifying the axis of ``a`` along which to construct the
+      repeated array. If None (default) then ``a`` is first flattened.
+    total_repeat_length: this must be specified statically for ``jnp.repeat``
+      to be compatible with :func:`~jax.jit` and other JAX transformations.
+      If ``sum(repeats)`` is larger than the specified ``total_repeat_length``,
+      the remaining values will be discarded. If ``sum(repeats)`` is smaller
+      than ``total_repeat_length``, the final value will be repeated.
+
+  Returns:
+    an array constructed from repeated values of ``a``.
+
+  See Also:
+    - :func:`jax.numpy.tile`: repeat a full array rather than individual values.
+
+  Examples:
+    Repeat each value twice along the last axis:
+
+    >>> a = jnp.array([[1, 2],
+    ...                [3, 4]])
+    >>> jnp.repeat(a, 2, axis=-1)
+    Array([[1, 1, 2, 2],
+           [3, 3, 4, 4]], dtype=int32)
+
+    If ``axis`` is not specified, the input array will be flattened:
+
+    >>> jnp.repeat(a, 2)
+    Array([1, 1, 2, 2, 3, 3, 4, 4], dtype=int32)
+
+    Pass an array to ``repeats`` to repeat each value a different number of times:
+
+    >>> repeats = jnp.array([2, 3])
+    >>> jnp.repeat(a, repeats, axis=1)
+    Array([[1, 1, 2, 2, 2],
+           [3, 3, 4, 4, 4]], dtype=int32)
+
+    In order to use ``repeat`` within ``jit`` and other JAX transformations, the
+    size of the output must be specified statically using ``total_repeat_length``:
+
+    >>> jit_repeat = jax.jit(jnp.repeat, static_argnames=['axis', 'total_repeat_length'])
+    >>> jit_repeat(a, repeats, axis=1, total_repeat_length=5)
+    Array([[1, 1, 2, 2, 2],
+           [3, 3, 4, 4, 4]], dtype=int32)
+
+    If `total_repeat_length` is smaller than ``sum(repeats)``, the result will be truncated:
+
+    >>> jit_repeat(a, repeats, axis=1, total_repeat_length=4)
+    Array([[1, 1, 2, 2],
+           [3, 3, 4, 4]], dtype=int32)
+
+    If it is larger, then the additional entries will be filled with the final value:
+
+    >>> jit_repeat(a, repeats, axis=1, total_repeat_length=7)
+    Array([[1, 1, 2, 2, 2, 2, 2],
+           [3, 3, 4, 4, 4, 4, 4]], dtype=int32)
+  """
   util.check_arraylike("repeat", a)
   core.is_dim(repeats) or util.check_arraylike("repeat", repeats)
 
