@@ -213,7 +213,8 @@ def _pallas_call_impl_interpret(
       if padding is not None and any(p != (0, 0) for p in padding):
         if input_output_aliases:
           raise NotImplementedError("Padding with aliasing not supported.")
-        x = lax.pad(x, jnp.zeros((), x.dtype), [(*p, 0) for p in padding])
+        pad_value = uninitialized_value(shape=(), dtype=x.dtype)
+        x = lax.pad(x, pad_value, [(*p, 0) for p in padding])
     carry.append(x)
 
   block_shapes_without_mapped_dims = [
@@ -999,6 +1000,17 @@ def _pallas_call_lowering(
 
 
 mlir.register_lowering(pallas_call_p, _pallas_call_lowering)
+
+
+def _pallas_custom_str_eqn_compact(
+    prim: jax_core.Primitive, params: dict[Any, Any]
+) -> str:
+  del prim, params
+  # Hide most info from compact str representation
+  return "pallas_call"
+jax_core.custom_str_eqn_compact_rules[pallas_call_p] = (
+    _pallas_custom_str_eqn_compact
+)
 
 
 def pallas_call(
