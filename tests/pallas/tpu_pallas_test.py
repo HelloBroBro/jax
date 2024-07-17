@@ -2048,9 +2048,6 @@ class PallasCallDynamicDMATest(PallasBaseTest):
 class PallasCallPrintTest(PallasBaseTest):
 
   def test_debug_print(self):
-    if jtu.is_cloud_tpu():
-      self.skipTest("Test fails on cloud TPU")
-
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
@@ -2069,9 +2066,6 @@ class PallasCallPrintTest(PallasBaseTest):
     self.assertIn('It works!', get_output())
 
   def test_debug_print_with_values(self):
-    if jtu.is_cloud_tpu():
-      self.skipTest("Test fails on cloud TPU")
-
     @functools.partial(
         self.pallas_call,
         in_specs=(pl.BlockSpec(memory_space=pltpu.SMEM),),
@@ -2259,13 +2253,11 @@ class PallasCallTPUBooleanTest(PallasBaseTest):
       )(input_arr)
 
 
-
 class PallasCallTPUBooleanInterpretTest(PallasCallTPUBooleanTest):
   INTERPRET: bool = True
 
 
 class PallasCallTPUCheckifyTest(PallasBaseTest):
-  INTERPRET: bool = True
 
   @parameterized.parameters((2,), (5,), (6,), (7,))
   def test_checkify_with_scalar_prefetch(self, threshold):
@@ -2311,17 +2303,17 @@ class PallasCallTPUCheckifyTest(PallasBaseTest):
       checkify.check(all_nequal, 'x_ref equals o_ref id=({x}, {y})',
                      x=pl.program_id(0), y=pl.program_id(1))
 
-    x = jax.random.uniform(jax.random.key(0), (128, 128), dtype=jnp.float32)
+    x = jax.random.uniform(jax.random.key(0), (128, 512), dtype=jnp.float32)
     pallas_call = self.pallas_call(
         body,
         out_shape=jax.ShapeDtypeStruct(x.shape, jnp.float32),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec((32, 32), lambda i, j: (i, j)),
+                pl.BlockSpec((32, 128), lambda i, j: (i, j)),
             ],
-            out_specs=pl.BlockSpec((32, 32), lambda i, j: (i, j)),
-            scratch_shapes=[pltpu.VMEM((32, 32), dtype=jnp.float32)],
+            out_specs=pl.BlockSpec((32, 128), lambda i, j: (i, j)),
+            scratch_shapes=[pltpu.VMEM((32, 128), dtype=jnp.float32)],
             grid=(4, 4),
         ),
     )
@@ -2365,6 +2357,10 @@ class PallasCallTPUCheckifyTest(PallasBaseTest):
     np.testing.assert_array_equal(
         result, np.full(shape, grid_size * 2.0, np.float32)
     )
+
+
+class PallasCallTPUCheckifyInterpretTest(PallasCallTPUCheckifyTest):
+  INTERPRET: bool = True
 
 
 class MiscellaneousInterpreterTest(PallasBaseTest):
