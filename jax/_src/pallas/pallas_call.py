@@ -274,7 +274,7 @@ def _pallas_call_impl_interpret(
           len(blocks),
           len(scratch_values),
       )
-      blocks = jax.core.eval_jaxpr(discharged_jaxpr, discharged_consts, *scalars,
+      blocks = jax_core.eval_jaxpr(discharged_jaxpr, discharged_consts, *scalars,
                                    *blocks, *scratch)
     blocks = blocks[grid_mapping.num_index_operands:]
     blocks, out_scratch = split_list(blocks, [num_inout])
@@ -787,7 +787,7 @@ def pallas_call_checkify_rule(error: checkify.Error,
     # errors before other arguments.
     jaxpr_args = [*input_error_vals, *scalars, *inputs, *outputs, *scratch]
     assert len(checked_jaxpr.jaxpr.invars) == len(jaxpr_args)
-    result_flat = jax.core.eval_jaxpr(
+    result_flat = jax_core.eval_jaxpr(
         checked_jaxpr.jaxpr, checked_jaxpr.consts, *jaxpr_args)
     output_errors, _ = split_list(result_flat, [num_err_vals])
     # Store new errors back in the error refs.
@@ -908,7 +908,7 @@ def _trace_to_jaxpr(fun: Callable, grid_spec: GridSpec,
   wrapped_fun, out_tree_thunk = api_util.flatten_fun_nokwargs(
       lu.wrap_init(fun), jaxpr_in_tree)
   debug = pe.debug_info(fun, jaxpr_in_tree, out_tree_thunk, False, "pallas_call")
-  with pallas_core.tracing_grid_env(grid_mapping.grid, ()):
+  with grid_mapping.trace_env():
     jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun,
                                                      jaxpr_flat_avals, debug)
     if consts:
@@ -1031,6 +1031,13 @@ def _pallas_custom_str_eqn_compact(
 jax_core.custom_str_eqn_compact_rules[pallas_call_p] = (
     _pallas_custom_str_eqn_compact
 )
+
+def _pallas_call_typecheck_rule(*in_avals, grid_mapping, **params):
+  with grid_mapping.trace_env():
+    return pallas_call_p.abstract_eval(
+        *in_avals, grid_mapping=grid_mapping, **params
+    )
+jax_core.custom_typechecks[pallas_call_p] = _pallas_call_typecheck_rule
 
 
 def pallas_call(

@@ -209,6 +209,7 @@ OnDeviceProfiler = profiler.OnDeviceProfiler
 class LaunchContext:
   launch_op: gpu.LaunchOp
   gmem_scratch_ptr: ir.Value
+  cluster_size: tuple[int, ...]
   profiler: OnDeviceProfiler | None = None
   next_scratch_offset: int = 0
   host_scratch_init: list[Callable[[ir.Value], None]] = dataclasses.field(
@@ -259,6 +260,33 @@ class LaunchContext:
     )
     gep.move_after(self.gmem_scratch_ptr.owner)
     return device_init(gep.result)
+
+  def cluster_collective_mask(self, collective: gpu.Dimension):
+    # We first compute the linearized index of the slice along the collective
+    # dim that contains the current block. Then, the mask is a sequence of 1s
+    # strided by the position of the collective dim, shifted left by the linear
+    # slice index.
+    # TODO(apaszke): Make sure this gets hoisted outside of any loops.
+    # If not, we might need to do it manually.
+    i32 = ir.IntegerType.get_signless(32)
+    stride = 1
+    mask_shift = c(0, i32)
+    collective_stride = None
+    for cluster_dim in gpu.Dimension:
+      if self.cluster_size[cluster_dim] == 1:
+        continue
+      if cluster_dim != collective:
+        dim_idx = arith.index_castui(i32, gpu.cluster_block_id(cluster_dim))
+        mask_shift = arith.addi(
+            mask_shift, arith.muli(dim_idx, c(stride, i32)),
+        )
+      else:
+        collective_stride = stride
+      stride *= self.cluster_size[cluster_dim]
+    mask_unshifted = 0
+    for i in range(self.cluster_size[collective]):
+      mask_unshifted |= 1 << (i * collective_stride)
+    return arith.shli(c(mask_unshifted, i32), mask_shift)
 
   def _get_tma_desc(
       self,
@@ -322,8 +350,10 @@ class LaunchContext:
       swizzle: int | None = None,
       arrive: bool | None = None,
       uniform: bool = True,
+      collective: gpu.Dimension | None = None,
   ):
     index = ir.IndexType.get()
+    i16 = ir.IntegerType.get_signless(16)
     i32 = ir.IntegerType.get_signless(32)
     smem = ir.Attribute.parse("#gpu.address_space<workgroup>")
     src_ref_ty = ir.MemRefType(src_ref.type)
@@ -377,11 +407,46 @@ class LaunchContext:
 
     if slice_shape != tuple(smem_ref_ty.shape):
       raise ValueError(
-          "Expected the SMEM reference to have the same shape as the tiled"
-          f" slice: {tuple(smem_ref_ty.shape)} != {slice_shape}"
+          "Expected the SMEM reference to have the same shape as the"
+          f" transformed slice: {tuple(smem_ref_ty.shape)} != {slice_shape}"
       )
+
+    dyn_base_indices = list(dyn_base_indices)
+    slice_shape = list(slice_shape)
+    if (
+        collective is not None
+        and (collective_size := self.cluster_size[collective]) != 1
+    ):
+      for collective_slice_dim, slice_size in enumerate(slice_shape[:-1]):
+        if slice_size % collective_size == 0:
+          break
+      else:
+        raise ValueError(
+            "None of the leading dimensions in the transformed slice shape"
+            f" {slice_shape} is divisible by the collective size"
+            f" {collective_size}"
+        )
+      # Make each block load a smaller slice, adjust the GMEM indices and slice
+      # the SMEM reference accordingly.
+      slice_shape[collective_slice_dim] //= collective_size
+      block_idx = gpu.cluster_block_id(collective)
+      block_offset = arith.muli(block_idx, c(slice_shape[collective_slice_dim], index))
+      dyn_base_indices[collective_slice_dim] = arith.addi(
+          dyn_base_indices[collective_slice_dim], block_offset,
+      )
+      smem_ref = mgpu.memref_slice(
+          smem_ref,
+          (slice(None),) * collective_slice_dim
+          + (mgpu.ds(block_offset, slice_shape[collective_slice_dim]),),
+      )
+      multicast_mask = arith.trunci(
+          i16, self.cluster_collective_mask(collective)
+      )
+    else:
+      multicast_mask = None
+
     tma_desc = self._get_tma_desc(
-        gmem_ref, gmem_transform, slice_shape, swizzle,
+        gmem_ref, gmem_transform, tuple(slice_shape), swizzle,
     )
 
     # We constuct TMA descriptors in column-major order.
@@ -414,7 +479,7 @@ class LaunchContext:
         if arrive:
           nvvm.mbarrier_arrive_expect_tx_shared(barrier_ptr, slice_bytes)
         nvvm.cp_async_bulk_tensor_shared_cluster_global(
-            smem_ptr, tma_desc, rev_dyn_base_indices, barrier_ptr, []
+            smem_ptr, tma_desc, rev_dyn_base_indices, barrier_ptr, [], multicast_mask=multicast_mask,
         )
     else:
       with uniform_ctx():
@@ -469,6 +534,7 @@ def _construct_smem_reftree(
 def _launch(
     token,
     grid,
+    cluster,
     block,
     scratch_arr,
     smem_buffers: ShapeTree | Union[ShapeTree],
@@ -500,10 +566,24 @@ def _launch(
   # TODO(cperivol): Query the shared memory size programmatically.
   if smem_bytes > 228 * 1024:
     raise ValueError(f"Mosaic GPU kernel exceeds available shared memory {smem_bytes=} > 228000")
+  if cluster:
+    if len(cluster) != 3:
+      raise ValueError("Clusters must be 3D")
+    cluster_kwargs = {
+        "clusterSize" + d: c(s, index) for s, d in zip(cluster, "XYZ")
+    }
+    for grid_size, cluster_size in zip(grid, cluster):
+      if grid_size % cluster_size != 0:
+        raise ValueError(
+            f"Grid dimension ({grid_size}) must be divisible by cluster"
+            f" dimension ({cluster_size})"
+        )
+  else:
+    cluster_kwargs = {}
   launch_op = gpu.LaunchOp(
       token.type, [token], *grid_vals, *block_vals,
-      dynamicSharedMemorySize=c(smem_bytes, i32))
-  launch_op.body.blocks.append(*([index] * 12))  # Append an empty block
+      dynamicSharedMemorySize=c(smem_bytes, i32), **cluster_kwargs)
+  launch_op.body.blocks.append(*([index] * (12 + 2 * len(cluster_kwargs))))  # Append an empty block
   smem = ir.Attribute.parse("#gpu.address_space<workgroup>")
   with ir.InsertionPoint(launch_op.body.blocks[0]):
     dynamic_smem = gpu.dynamic_shared_memory(
@@ -539,7 +619,7 @@ def _launch(
 
     ptr_ty = ir.Type.parse("!llvm.ptr")
     scratch_ptr = builtin.unrealized_conversion_cast([ptr_ty], [scratch_arr])
-    yield LaunchContext(launch_op, scratch_ptr, prof), smem_ref_tree
+    yield LaunchContext(launch_op, scratch_ptr, cluster, prof), smem_ref_tree
     if prof is not None:
       prof.finalize(grid=grid, block=block)
     gpu.terminator()
@@ -548,6 +628,7 @@ def _launch(
 def _lower_as_gpu_kernel(
     body,
     grid: tuple[int, ...],
+    cluster: tuple[int, ...],
     block: tuple[int, ...],
     in_shapes: tuple[Any, ...],
     out_shape,
@@ -601,7 +682,7 @@ def _lower_as_gpu_kernel(
       scratch_alloc = llvm.AllocaOp(ptr_ty, c(1, i64), empty_arr_ty)
       scratch_arr = llvm.load(empty_arr_ty, scratch_alloc.result)
       with _launch(
-          token, grid, block, scratch_arr, smem_scratch_shape,
+          token, grid, cluster, block, scratch_arr, smem_scratch_shape,
           prof_spec, prof_buffer
       ) as (launch_ctx, smem_refs):
         body(launch_ctx, *in_refs, *out_refs, smem_refs)
@@ -632,6 +713,7 @@ def as_gpu_kernel(
     out_shape,
     smem_scratch_shape: ShapeTree | Union[ShapeTree],
     prof_spec: profiler.ProfilerSpec | None = None,
+    cluster: tuple[int, ...] = (),
 ):
   if isinstance(in_shape, list):
     in_shape = tuple(in_shape)
@@ -640,7 +722,7 @@ def as_gpu_kernel(
 
   module, out_shape, gmem_scratch_bytes, unwrap_output_tuple = (
       _lower_as_gpu_kernel(
-          body, grid, block, in_shape, out_shape, smem_scratch_shape, prof_spec
+          body, grid, cluster, block, in_shape, out_shape, smem_scratch_shape, prof_spec
       )
   )
 

@@ -41,8 +41,6 @@ jax_test(
     disable_configs = [
         "gpu",
         "gpu_x32",
-        "gpu_a100",
-        "gpu_h100",
         "gpu_p100",
         "gpu_p100_x32",
     ],
@@ -173,6 +171,7 @@ jax_test(
     deps = [
         "//jax:pallas",
         "//jax:pallas_gpu",  # build_cleaner: keep
+        "//jax/_src/pallas/mosaic_gpu",
     ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
@@ -337,6 +336,24 @@ jax_test(
 )
 
 jax_test(
+    name = "tpu_pallas_mesh_test",
+    srcs = ["tpu_pallas_mesh_test.py"],
+    disable_backends = [
+        "cpu",
+        "gpu",
+    ],
+    tags = [
+        "noasan",
+        "nomsan",
+        "notsan",
+    ],
+    deps = [
+        "//jax:extend",
+        "//jax:pallas_tpu",
+    ],
+)
+
+jax_test(
     name = "tpu_pallas_random_test",
     srcs = [
         "tpu_pallas_random_test.py",
@@ -378,10 +395,10 @@ jax_test(
         "tpu_splash_attention_kernel_test.py",
     ],
     disable_backends = [
-        "cpu",
         "gpu",
+        "cpu",
     ],
-    shard_count = 18,
+    shard_count = 24,
     tags = [
         "noasan",  # Times out.
         "nomsan",  # Times out.
@@ -398,7 +415,6 @@ jax_test(
         "tpu_splash_attention_mask_test.py",
     ],
     disable_backends = [
-        "cpu",
         "gpu",
     ],
     deps = [
@@ -417,7 +433,6 @@ jax_test(
         },
     },
     disable_backends = [
-        "cpu",
         "tpu",
     ],
     disable_configs = [
@@ -451,7 +466,6 @@ jax_test(
         },
     },
     disable_backends = [
-        "cpu",
         "tpu",
     ],
     disable_configs = [

@@ -24,13 +24,13 @@ import itertools
 import math
 from typing import Any, NamedTuple, Union, cast
 
+from jax._src import core
 from jax._src import mesh as mesh_lib
 from jax._src import sharding
 from jax._src import sharding_specs
 from jax._src import tree_util
 from jax._src import util
 from jax._src import xla_bridge
-from jax._src import core
 from jax._src.lib import xla_client as xc
 from jax._src.op_shardings import (
     are_op_shardings_equal, get_num_ways_dim_sharded, is_op_sharding_replicated)
@@ -295,6 +295,19 @@ class NamedSharding(sharding.Sharding):
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return named_sharding_to_xla_hlo_sharding(self, num_dimensions)
 
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    dim_shardings = [sharding.SdyDimSharding(axes=[], is_closed=True)
+                     for _ in range(num_dimensions)]
+    for i, dim_spec in enumerate(self._parsed_pspec):
+      if dim_spec is None:
+        dim_shardings[i].is_closed = False
+      elif not dim_spec:
+        # Already empty and closed sharding.
+        pass
+      else:
+        dim_shardings[i].axes = dim_spec
+    return sharding.SdyArraySharding('mesh', dim_shardings)
+
 
 @util.cache(max_size=128, trace_context_in_key=False)
 def get_replicated_hlo_sharding():
@@ -362,6 +375,12 @@ class SingleDeviceSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return get_replicated_hlo_sharding()
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    return sharding.SdyArraySharding(
+        'mesh',
+        [sharding.SdyDimSharding(axes=[], is_closed=True)
+         for _ in range(num_dimensions)])
 
   @property
   def is_fully_replicated(self) -> bool:
@@ -494,6 +513,9 @@ class PmapSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     raise NotImplementedError("pmap doesn't use OpSharding.")
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError("pmap doesn't use SdyArraySharding.")
 
   @functools.cached_property
   def is_fully_replicated(self) -> bool:
@@ -698,6 +720,10 @@ class PositionalSharding(sharding.Sharding):
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return _positional_sharding_to_xla_hlo_sharding(self, num_dimensions)
 
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError(
+        "PositionalSharding can't be converted to an SdyArraySharding.")
+
   @functools.cached_property
   def is_fully_addressable(self) -> bool:
     return self._internal_device_list.is_fully_addressable
@@ -806,6 +832,10 @@ class GSPMDSharding(sharding.Sharding):
 
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return self._hlo_sharding
+
+  def _to_sdy_sharding(self, num_dimensions: int) -> sharding.SdyArraySharding:
+    raise NotImplementedError(
+        "GSPMDSharding can't be converted to SdyArraySharding.")
 
   @functools.cached_property
   def is_fully_replicated(self) -> bool:

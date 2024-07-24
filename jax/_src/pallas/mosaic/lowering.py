@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import contextlib
 import dataclasses
 import functools
 import string
-from typing import Any
+from typing import Any, Hashable
 
 import jax
 from jax import lax
@@ -46,6 +47,7 @@ from jax._src.lib.mlir.dialects import math
 from jax._src.lib.mlir.dialects import memref
 from jax._src.lib.mlir.dialects import scf
 from jax._src.lib.mlir.dialects import vector
+from jax._src.pallas import pallas_call
 from jax._src.pallas import core as pl_core
 from jax._src.pallas import primitives
 from jax._src.pallas import utils as pallas_utils
@@ -98,7 +100,8 @@ class MeshContext:
 @dataclasses.dataclass
 class LoweringContext:
   ir_context: ir.Context
-  grid_rank: int  # Includes both user and vmap axes.
+  grid_sizes: tuple[int, ...]  # Includes both user and vmap axes.
+  grid_names: tuple[Hashable, ...] | None
   mapped_dims: tuple[int, ...]  # Indices of vmapped grid dimensions.
   user_grid_indices: Sequence[ir.Value] | None
   block_shapes: list[tuple[int | pl_core.Mapped, ...]]
@@ -107,6 +110,24 @@ class LoweringContext:
   replace = dataclasses.replace
   traceback_caches: mlir.TracebackCaches
   for_verification: bool
+
+  @property
+  def grid_rank(self):
+    return len(self.grid_sizes)
+
+  @contextlib.contextmanager
+  def grid_name_context(self):
+    # TODO(b/355036977): generalize this across other platforms
+    if not self.grid_names:
+      yield
+      return
+    grid_names = self.grid_names
+    valid_grid_sizes = tuple(
+        d for i, d in enumerate(self.grid_sizes) if i not in self.mapped_dims
+    )
+    grid_env = zip(grid_names, valid_grid_sizes)
+    with jax_core.extend_axis_env_nd(grid_env):
+      yield
 
 
 @dataclasses.dataclass
@@ -252,6 +273,7 @@ def _get_arg_type(
 @dataclasses.dataclass(init=False)
 class MosaicGridMapping:
   grid: tuple[int, ...] | None
+  grid_names: tuple[Hashable, ...] | None
   jaxpr: jax_core.Jaxpr
   block_mappings: tuple[pl_core.BlockMapping | None, ...]
   mapped_dims: tuple[int, ...]
@@ -269,6 +291,7 @@ class MosaicGridMapping:
                dimension_semantics: tuple[str, ...] | None,
                mesh: mesh_lib.Mesh | None):
     self.grid = grid_mapping.grid
+    self.grid_names = grid_mapping.grid_names
     self.jaxpr = jaxpr
     self.block_mappings = grid_mapping.block_mappings
     self.mapped_dims = grid_mapping.mapped_dims
@@ -341,6 +364,12 @@ class MosaicGridMapping:
           "Cannot use communication in pallas_call without shard_map."
       )
     axis_names = mesh.axis_names
+    if self.grid_names is not None:
+      if any(a in self.grid_names for a in axis_names):
+        raise ValueError(
+            "Cannot shadow axis mesh axis names with grid names. mesh axis"
+            f" names: {mesh.axis_names}, grid names: {self.grid_names}"
+        )
     # We need mesh <-> logical translation tables. Since the logical IDs are
     # just linearized versions of the mesh IDs, we create those tables.
     mesh_strides = pallas_utils.strides_from_shape(tuple(
@@ -356,7 +385,19 @@ class MosaicGridMapping:
 
   @functools.cached_property
   def has_communication(self) -> bool:
-    return bool(jax_core.used_axis_names_jaxpr(self.jaxpr))
+    nonlocal_axis_names = set()
+    def _get_nonlocal_axis_names(jaxpr: jax_core.Jaxpr):
+      return {
+          e.name
+          for e in jaxpr.effects
+          if isinstance(e, jax_core.NamedAxisEffect)
+          and (not self.grid_names or e.name not in self.grid_names)
+      }
+    nonlocal_axis_names.update(_get_nonlocal_axis_names(self.jaxpr))
+    for bm in self.block_mappings:
+      if bm is not None:
+        nonlocal_axis_names.update(_get_nonlocal_axis_names(bm.index_map_jaxpr))
+    return bool(nonlocal_axis_names)
 
   def get_extra_args(self) -> tuple[Any, ...]:
     return ()
@@ -530,7 +571,8 @@ def lower_jaxpr_to_transform_func(
       mesh_context = None
     lowering_context = LoweringContext(
         ctx,
-        len(mosaic_grid_mapping.grid),
+        mosaic_grid_mapping.grid,
+        mosaic_grid_mapping.grid_names,
         mosaic_grid_mapping.mapped_dims,
         None,
         arg_block_shapes,
@@ -598,7 +640,8 @@ def lower_jaxpr_to_func(
       mesh_context = None
     lowering_context = LoweringContext(
         ctx,
-        len(mosaic_grid_mapping.grid),
+        mosaic_grid_mapping.grid,
+        mosaic_grid_mapping.grid_names,
         mosaic_grid_mapping.mapped_dims,
         jaxpr_indices,
         arg_block_shapes,
@@ -2495,7 +2538,8 @@ def _run_scoped_lowering_rule(ctx: LoweringRuleContext, *consts, jaxpr):
   out_type = [aval_to_ir_type(aval) for aval in ctx.avals_out]
   region = tpu.RegionOp(out_type)
   in_avals = [v.aval for v in jaxpr.invars]
-  jaxpr = pe.convert_constvars_jaxpr(jaxpr)
+  with ctx.lowering_context.grid_name_context():
+    jaxpr = pe.convert_constvars_jaxpr(jaxpr)
   with ir.InsertionPoint(region.body):
     args = map(_alloc_value, in_avals)
     block_shapes = tuple(a.shape if isinstance(a, state.AbstractRef) else None
@@ -2627,10 +2671,18 @@ def _device_id_lowering_rule(ctx: LoweringRuleContext):
   return tpu.DeviceIdOp().result
 lowering_rules[tpu_primitives.device_id_p] = _device_id_lowering_rule
 
-def _axis_index_rule(ctx: LoweringRuleContext, *, axis_name: str):
+def _axis_index_rule(ctx: LoweringRuleContext, *, axis_name: Hashable):
+  grid_names = ctx.lowering_context.grid_names
+  if grid_names and axis_name in grid_names:
+    # We are querying a named axis corresponding to a grid dimension.
+    return _program_id_lowering_rule(ctx, axis=grid_names.index(axis_name))
+  # We are querying a named axis corresponding to a mesh dimension.
   device_id = tpu.DeviceIdOp().result
-  mesh_shape = ctx.lowering_context.mesh_context.mesh_shape
-  axis_names = ctx.lowering_context.mesh_context.axis_names
+  mesh_context = ctx.lowering_context.mesh_context
+  if mesh_context is None:
+    raise ValueError("Mesh context is not set.")
+  mesh_shape = mesh_context.mesh_shape
+  axis_names = mesh_context.axis_names
   axis_index = axis_names.index(axis_name)
   axis_size = ir_constant(mesh_shape[axis_index])
   minor_divisor = ir_constant(
@@ -2772,3 +2824,54 @@ def random_wrap_lowering(ctx, key_data, *, impl):
     raise NotImplementedError(f"key_data wrap {type(key_data)}")
 
 lowering_rules[prng.random_wrap_p] = random_wrap_lowering
+
+
+# Lowering for shard_map
+
+# Technically this is not a lowering rule, but a discharge rule. When we use
+# a special pallas mesh for a shard_map inside of a run_state, we turn it into
+# a pallas call. The pallas_call has named grid axes corresponding to the names
+# in the pallas mesh. It also sets up input/output aliasing automatically.
+
+def _shard_map_discharge_rule(
+    in_avals,
+    out_avals,
+    *args,
+    mesh,
+    auto,
+    in_names,
+    out_names,
+    jaxpr,
+    check_rep,
+    rewrite,
+):
+  del out_avals, auto, in_names, out_names, check_rep, rewrite
+  if not isinstance(mesh, pl_core.PallasMesh):
+    raise NotImplementedError("Mesh must be a PallasMesh")
+  if len(mesh.shape) > 1:
+    raise NotImplementedError("Mesh must be 1D")
+  core_axis_name, num_cores = list(mesh.shape.items())[0]
+  def body(*args):
+    in_refs = args[:len(in_avals)]
+    jax_core.eval_jaxpr(jaxpr, (), *in_refs)
+  assert len(jaxpr.outvars) == 0
+  out = pallas_call.pallas_call(
+      body,
+      out_shape=in_avals,
+      in_specs=[pl_core.BlockSpec(memory_space=tpu_core.TPUMemorySpace.ANY)]
+      * len(in_avals),
+      out_specs=[pl_core.BlockSpec(memory_space=tpu_core.TPUMemorySpace.ANY)]
+      * len(in_avals),
+      input_output_aliases={i: i for i in range(len(in_avals))},
+      grid=((core_axis_name, num_cores),),
+      compiler_params=dict(
+          mosaic=dict(dimension_semantics=("parallel",)),
+      ),
+  )(*args)
+  return out, ()
+
+
+from jax.experimental import shard_map
+state_discharge.register_discharge_rule(shard_map.shard_map_p)(
+    _shard_map_discharge_rule
+)

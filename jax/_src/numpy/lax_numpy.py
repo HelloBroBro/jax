@@ -2765,13 +2765,14 @@ def _pad_wrap(array: Array, pad_width: PadValue[int]) -> Array:
       _check_no_padding(pad_width[i], "wrap")
       continue
     size = array.shape[i]
-    repeats, (left_remainder, right_remainder) = np.divmod(pad_width[i], size)
-    total_repeats = repeats.sum() + 1
+    left_repeats, left_remainder = divmod(pad_width[i][0], size)
+    right_repeats, right_remainder = divmod(pad_width[i][1], size)
+    total_repeats = left_repeats + right_repeats + 1
     parts = []
-    if left_remainder:
+    if left_remainder > 0:
       parts += [lax.slice_in_dim(array, size - left_remainder, size, axis=i)]
     parts += total_repeats * [array]
-    if right_remainder:
+    if right_remainder > 0:
       parts += [lax.slice_in_dim(array, 0, right_remainder, axis=i)]
     array = lax.concatenate(parts, dimension=i)
   return array
@@ -2787,8 +2788,7 @@ def _pad_symmetric_or_reflect(array: Array, pad_width: PadValue[int],
       _check_no_padding(pad_width[i], mode)
       continue
 
-    n = array.shape[i]
-    offset = 1 if (mode == "reflect" and n > 1) else 0
+    axis_size = array.shape[i]
 
     def build_padding(array, padding, before):
       if before:
@@ -2796,23 +2796,41 @@ def _pad_symmetric_or_reflect(array: Array, pad_width: PadValue[int],
       else:
         edge = lax.slice_in_dim(array, -1, None, axis=i)
 
+      # Try to give nicer error messages for unsupported shape polymorphic uses
+      shape_poly_error_msg = lambda: (
+          "Shape polymorphism is supported for jnp.pad with 'reflect' or "
+          "'symmetric' padding mode only when it is possible to determine "
+          f"at lowering time that the axis size (= {axis_size}) is larger than 1 "
+          f"and larger or equal than the padding length (= {padding}). "
+          f"Error while handling {'left' if before else 'right'} padding on axis {i}.")
+      try:
+        # We check that we can determine all comparisions.
+        offset = 1 if (mode == "reflect" and axis_size > 1) else 0
+        has_poly_dim = not core.is_constant_shape((axis_size, padding))
+        # For shape polymorphism, ensure the loop below ends after 1 iteration
+        if has_poly_dim and not (axis_size > 1 and axis_size - offset >= padding):
+          raise ValueError(shape_poly_error_msg())
+      except core.InconclusiveDimensionOperation as e:
+        raise ValueError(shape_poly_error_msg()) from e
+
       while padding > 0:
-        curr_pad = min(padding, n - offset)
+        curr_pad = min(padding, axis_size - offset)
         padding -= curr_pad
+        if has_poly_dim: assert padding == 0
 
         if before:
           start = offset
           stop = offset + curr_pad
         else:
           start = -(curr_pad + offset)
-          stop = None if (mode == "symmetric" or n == 1) else -1
+          stop = None if (mode == "symmetric" or axis_size == 1) else -1
 
         x = lax.slice_in_dim(array, start, stop, axis=i)
         x = flip(x, axis=i)
 
         if reflect_type == 'odd':
           x = 2 * edge - x
-          if n > 1:
+          if axis_size > 1:
             if before:
               edge = lax.slice_in_dim(x, 0, 1, axis=i)
             else:
@@ -4308,7 +4326,7 @@ def linspace(start: ArrayLike, stop: ArrayLike, num: int = 50,
              endpoint: bool = True, retstep: bool = False,
              dtype: DTypeLike | None = None,
              axis: int = 0) -> Array | tuple[Array, Array]:
-  num = core.concrete_or_error(operator.index, num, "'num' argument of jnp.linspace")
+  num = core.concrete_dim_or_error(num, "'num' argument of jnp.linspace")
   axis = core.concrete_or_error(operator.index, axis, "'axis' argument of jnp.linspace")
   return _linspace(start, stop, num, endpoint, retstep, dtype, axis)
 
@@ -4337,13 +4355,13 @@ def _linspace(start: ArrayLike, stop: ArrayLike, num: int = 50,
   bounds_shape.insert(axis, 1)
   div = (num - 1) if endpoint else num
   if num > 1:
-    delta: Array = lax.convert_element_type(stop - start, computation_dtype) / div
+    delta: Array = lax.convert_element_type(stop - start, computation_dtype) / array(div, dtype=computation_dtype)
     iota_shape = [1,] * len(bounds_shape)
     iota_shape[axis] = div
     # This approach recovers the endpoints with float32 arithmetic,
     # but can lead to rounding errors for integer outputs.
     real_dtype = finfo(computation_dtype).dtype
-    step = reshape(lax.iota(real_dtype, div), iota_shape) / div
+    step = reshape(lax.iota(real_dtype, div), iota_shape) / array(div, real_dtype)
     step = step.astype(computation_dtype)
     out = (reshape(broadcast_start, bounds_shape) * (1 - step) +
       reshape(broadcast_stop, bounds_shape) * step)
@@ -4355,7 +4373,7 @@ def _linspace(start: ArrayLike, stop: ArrayLike, num: int = 50,
   elif num == 1:
     delta = asarray(nan if endpoint else stop - start, dtype=computation_dtype)
     out = reshape(broadcast_start, bounds_shape)
-  else: # num == 0 degenerate case, match numpy behavior
+  else:  # num == 0 degenerate case, match numpy behavior
     empty_shape = list(lax.broadcast_shapes(shape(start), shape(stop)))
     empty_shape.insert(axis, 0)
     delta = asarray(nan, dtype=computation_dtype)
@@ -4710,17 +4728,114 @@ def trapezoid(y: ArrayLike, x: ArrayLike | None = None, dx: ArrayLike = 1.0,
   return 0.5 * (dx_array * (y_arr[..., 1:] + y_arr[..., :-1])).sum(-1)
 
 
-@util.implements(np.tri)
 def tri(N: int, M: int | None = None, k: int = 0, dtype: DTypeLike | None = None) -> Array:
+  r"""Return an array with ones on and below the diagonal and zeros elsewhere.
+
+  JAX implementation of :func:`numpy.tri`
+
+  Args:
+    N: int. Dimension of the rows of the returned array.
+    M: optional, int. Dimension of the columns of the returned array. If not
+      specified, then ``M = N``.
+    k: optional, int, default=0. Specifies the sub-diagonal on and below which
+      the array is filled with ones. ``k=0`` refers to main diagonal, ``k<0``
+      refers to sub-diagonal below the main diagonal and ``k>0`` refers to
+      sub-diagonal above the main diagonal.
+    dtype: optional, data type of the returned array. The default type is float.
+
+  Returns:
+    An array of shape ``(N, M)`` containing the lower triangle with elements
+    below the sub-diagonal specified by ``k`` are set to one and zero elsewhere.
+
+  See also:
+    - :func:`jax.numpy.tril`: Returns a lower triangle of an array.
+    - :func:`jax.numpy.triu`: Returns an upper triangle of an array.
+
+  Examples:
+    >>> jnp.tri(3)
+    Array([[1., 0., 0.],
+           [1., 1., 0.],
+           [1., 1., 1.]], dtype=float32)
+
+    When ``M`` is not equal to ``N``:
+
+    >>> jnp.tri(3, 4)
+    Array([[1., 0., 0., 0.],
+           [1., 1., 0., 0.],
+           [1., 1., 1., 0.]], dtype=float32)
+
+    when ``k>0``:
+
+    >>> jnp.tri(3, k=1)
+    Array([[1., 1., 0.],
+           [1., 1., 1.],
+           [1., 1., 1.]], dtype=float32)
+
+    When ``k<0``:
+
+    >>> jnp.tri(3, 4, k=-1)
+    Array([[0., 0., 0., 0.],
+           [1., 0., 0., 0.],
+           [1., 1., 0., 0.]], dtype=float32)
+  """
   dtypes.check_user_dtype_supported(dtype, "tri")
   M = M if M is not None else N
   dtype = dtype or float32
   return lax_internal._tri(dtype, (N, M), k)
 
 
-@util.implements(np.tril)
 @partial(jit, static_argnames=('k',))
 def tril(m: ArrayLike, k: int = 0) -> Array:
+  r"""Return lower triangle of an array.
+
+  JAX implementation of :func:`numpy.tril`
+
+  Args:
+    m: input array. Must have ``m.ndim >= 2``.
+    k: k: optional, int, default=0. Specifies the sub-diagonal above which the
+      elements of the array are set to zero. ``k=0`` refers to main diagonal,
+      ``k<0`` refers to sub-diagonal below the main diagonal and ``k>0`` refers
+      to sub-diagonal above the main diagonal.
+
+  Returns:
+    An array with same shape as input containing the upper triangle of the given
+    array with elements below the sub-diagonal specified by ``k`` are set to zero.
+
+  See also:
+    - :func:`jax.numpy.triu`: Returns an upper triangle of an array.
+    - :func:`jax.numpy.tri`: Returns an array with ones on and below the diagonal
+      and zeros elsewhere.
+
+  Examples:
+    >>> x = jnp.array([[1, 2, 3, 4],
+    ...                [5, 6, 7, 8],
+    ...                [9, 10, 11, 12]])
+    >>> jnp.tril(x)
+    Array([[ 1,  0,  0,  0],
+           [ 5,  6,  0,  0],
+           [ 9, 10, 11,  0]], dtype=int32)
+    >>> jnp.tril(x, k=1)
+    Array([[ 1,  2,  0,  0],
+           [ 5,  6,  7,  0],
+           [ 9, 10, 11, 12]], dtype=int32)
+    >>> jnp.tril(x, k=-1)
+    Array([[ 0,  0,  0,  0],
+           [ 5,  0,  0,  0],
+           [ 9, 10,  0,  0]], dtype=int32)
+
+    When ``m.ndim > 2``, ``jnp.tril`` operates batch-wise on the trailing axes.
+
+    >>> x1 = jnp.array([[[1, 2],
+    ...                  [3, 4]],
+    ...                 [[5, 6],
+    ...                  [7, 8]]])
+    >>> jnp.tril(x1)
+    Array([[[1, 0],
+            [3, 4]],
+    <BLANKLINE>
+           [[5, 0],
+            [7, 8]]], dtype=int32)
+  """
   util.check_arraylike("tril", m)
   m_shape = shape(m)
   if len(m_shape) < 2:
@@ -4730,9 +4845,62 @@ def tril(m: ArrayLike, k: int = 0) -> Array:
   return lax.select(lax.broadcast(mask, m_shape[:-2]), m, zeros_like(m))
 
 
-@util.implements(np.triu, update_doc=False)
 @partial(jit, static_argnames=('k',))
 def triu(m: ArrayLike, k: int = 0) -> Array:
+  r"""Return upper triangle of an array.
+
+  JAX implementation of :func:`numpy.triu`
+
+  Args:
+    m: input array. Must have ``m.ndim >= 2``.
+    k: k: optional, int, default=0. Specifies the sub-diagonal below which the
+      elements of the array are set to zero. ``k=0`` refers to main diagonal,
+      ``k<0`` refers to sub-diagonal below the main diagonal and ``k>0`` refers
+      to sub-diagonal above the main diagonal.
+
+  Returns:
+    An array with same shape as input containing the lower triangle of the given
+    array with elements above the sub-diagonal specified by ``k`` are set to zero.
+
+  See also:
+    - :func:`jax.numpy.tril`: Returns a lower triangle of an array.
+    - :func:`jax.numpy.tri`: Returns an array with ones on and below the diagonal
+      and zeros elsewhere.
+
+  Examples:
+    >>> x = jnp.array([[1, 2, 3],
+    ...                [4, 5, 6],
+    ...                [7, 8, 9],
+    ...                [10, 11, 12]])
+    >>> jnp.triu(x)
+    Array([[1, 2, 3],
+           [0, 5, 6],
+           [0, 0, 9],
+           [0, 0, 0]], dtype=int32)
+    >>> jnp.triu(x, k=1)
+    Array([[0, 2, 3],
+           [0, 0, 6],
+           [0, 0, 0],
+           [0, 0, 0]], dtype=int32)
+    >>> jnp.triu(x, k=-1)
+    Array([[ 1,  2,  3],
+           [ 4,  5,  6],
+           [ 0,  8,  9],
+           [ 0,  0, 12]], dtype=int32)
+
+    When ``m.ndim > 2``, ``jnp.triu`` operates batch-wise on the trailing axes.
+
+    >>> x1 = jnp.array([[[1, 2],
+    ...                  [3, 4]],
+    ...                 [[5, 6],
+    ...                  [7, 8]]])
+    >>> jnp.triu(x1)
+    Array([[[1, 2],
+            [0, 4]],
+    <BLANKLINE>
+           [[5, 6],
+            [0, 8]]], dtype=int32)
+  """
   util.check_arraylike("triu", m)
   m_shape = shape(m)
   if len(m_shape) < 2:

@@ -739,6 +739,15 @@ class Tracer(typing.Array, metaclass=StrictABCMeta):
       f"{self._origin_msg()}")
 
   @property
+  def device(self):
+    # This attribute is part of the jax.Array API, but only defined on concrete arrays.
+    # Raising a ConcretizationTypeError would make sense, but for backward compatibility
+    # we raise an AttributeError so that hasattr() and getattr() work as expected.
+    raise AttributeError(self,
+      f"The 'device' attribute is not available on {self._error_repr()}."
+      f"{self._origin_msg()}")
+
+  @property
   def addressable_shards(self):
     raise ConcretizationTypeError(self,
       f"The 'addressable_shards' attribute is not available on {self._error_repr()}."
@@ -1541,7 +1550,7 @@ def concrete_or_error(force: Any, val: Any, context=""):
 
 def concrete_dim_or_error(val: Any, context=""):
   """Like concrete_or_error(operator.index), allowing symbolic dimensions."""
-  if is_dim(val):
+  if is_symbolic_dim(val):
     return val
   else:
     return concrete_or_error(operator.index, val, context=context)
@@ -2076,14 +2085,16 @@ def raise_to_shaped(aval: AbstractValue, weak_type=None):
     if handler: return handler(aval, weak_type)
   raise TypeError(type(aval))
 
-raise_to_shaped_mappings : dict[type, Callable] = {
-  AbstractToken: lambda aval, _: aval,
-  Bot: lambda aval, _: aval,
-  UnshapedArray: lambda aval, _: aval,
-  ShapedArray: lambda aval, weak_type: ShapedArray(
-      aval.shape, aval.dtype, weak_type, aval.named_shape),
-  DConcreteArray: lambda aval, weak_type: DShapedArray(
-      aval.shape, aval.dtype, weak_type),
+raise_to_shaped_mappings: dict[type, Callable] = {
+    AbstractToken: lambda aval, _: aval,
+    Bot: lambda aval, _: aval,
+    UnshapedArray: lambda aval, _: aval,
+    ShapedArray: lambda aval, weak_type: ShapedArray(
+        aval.shape, aval.dtype, weak_type, aval.named_shape
+    ),
+    DConcreteArray: lambda aval, weak_type: DShapedArray(
+        aval.shape, aval.dtype, weak_type
+    ),
 }
 
 ### Operations on shapes and dimension sizes.
