@@ -220,7 +220,6 @@ py_library_providing_imports_info(
         "_src/interpreters/ad.py",
         "_src/interpreters/batching.py",
         "_src/interpreters/pxla.py",
-        "_src/maps.py",
         "_src/pjit.py",
         "_src/prng.py",
         "_src/public_test_util.py",
@@ -262,8 +261,6 @@ py_library_providing_imports_info(
         ],
     ) + [
         "experimental/attrs.py",
-        # until new parallelism APIs are moved out of experimental
-        "experimental/maps.py",
         "experimental/pjit.py",
         "experimental/multihost_utils.py",
         "experimental/shard_map.py",
@@ -629,6 +626,7 @@ pytype_strict_library(
     deps = [
         ":pallas",  # build_cleaner: keep
         ":tpu_custom_call",
+        "//jax/_src/pallas",
         "//jax/_src/pallas/mosaic:core",
         "//jax/_src/pallas/mosaic:lowering",
         "//jax/_src/pallas/mosaic:pallas_call_registration",  # build_cleaner: keep
@@ -675,7 +673,6 @@ pytype_strict_library(
         ":pallas",
         "//jax/_src/pallas/mosaic_gpu:core",  # build_cleaner: keep
         "//jax/_src/pallas/mosaic_gpu:pallas_call_registration",  # build_cleaner: keep
-        "//jax/_src/pallas/mosaic_gpu:primitives",  # build_cleaner: keep
         "//jax/_src/pallas/triton:pallas_call_registration",  # build_cleaner: keep
         "//jax/_src/pallas/triton:primitives",
     ],
@@ -1039,17 +1036,6 @@ pytype_library(
     srcs = ["experimental/ode.py"],
     visibility = ["//visibility:public"],
     deps = [":jax"],
-)
-
-# TODO(apaszke): Remove this target
-pytype_library(
-    name = "maps",
-    srcs = ["experimental/maps.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":jax",
-        ":mesh",
-    ],
 )
 
 # TODO(apaszke): Remove this target

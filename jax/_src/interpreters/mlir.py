@@ -874,20 +874,40 @@ class LoweringResult(NamedTuple):
 _platforms_with_donation = ["cpu", "cuda", "rocm", "tpu"]
 
 
+def add_manual_axes(axis_ctx: sharding_impls.SPMDAxisContext, sharding, ndim):
+  mesh = axis_ctx.mesh
+  if (isinstance(sharding, sharding_impls.NamedSharding) and
+      sharding.mesh.shape == mesh.shape):
+    return sharding_impls.NamedSharding._from_parsed_pspec(
+        sharding.mesh, sharding._parsed_pspec, memory_kind=sharding.memory_kind,
+        _manual_axes=axis_ctx.manual_axes)
+  else:
+    parsed_pspec = sharding_impls.parse_flatten_op_sharding(
+      sharding._to_xla_hlo_sharding(ndim), mesh)[0]
+    return sharding_impls.NamedSharding._from_parsed_pspec(
+      mesh, parsed_pspec, memory_kind=sharding.memory_kind,
+      _manual_axes=axis_ctx.manual_axes)
+
+
 def _to_physical_op_sharding(
+    ctx: ModuleContext,
     aval: core.AbstractValue, sharding: JSharding | None,
 ) -> xc.OpSharding | sharding.SdyArraySharding | None:
   if sharding is None:
     return None
   assert isinstance(sharding, JSharding)
   if isinstance(aval, AbstractRef):
-    return _to_physical_op_sharding(aval.inner_aval, sharding)
+    return _to_physical_op_sharding(ctx, aval.inner_aval, sharding)
   assert isinstance(aval, (core.ShapedArray, core.DShapedArray))
   if dtypes.issubdtype(aval.dtype, dtypes.extended):
     sharding = sharding_impls.physical_sharding(aval, sharding)
     aval = core.physical_aval(aval)
+  axis_ctx = ctx.axis_context
+  if (isinstance(axis_ctx, sharding_impls.SPMDAxisContext) and
+      axis_ctx.manual_axes):
+    sharding = add_manual_axes(axis_ctx, sharding, aval.ndim)
   if config.use_shardy_partitioner.value:
-    return sharding._to_sdy_sharding(aval.ndim)
+    return sharding._to_sdy_sharding(aval.ndim)  # type: ignore
   return sharding._to_xla_hlo_sharding(aval.ndim).to_proto()  # type: ignore
 
 
@@ -1076,7 +1096,7 @@ def _set_up_aliases(input_output_aliases, avals_in, avals_out, donated_args,
     input_output_aliases = list(input_output_aliases)
   # To match-up in-avals to out-avals we only care about the number of
   # bytes, so we strip off unrelated aval metadata (eg. the named shape)
-  strip_metadata = lambda a: a.strip_named_shape().strip_weak_type()
+  strip_metadata = lambda a: a.strip_weak_type()
   avals_in = map(strip_metadata, avals_in)
   avals_out = map(strip_metadata, avals_out)
 
@@ -1271,7 +1291,7 @@ def lower_jaxpr_to_fun(
   ir_arg_shardings = None
   if arg_shardings is not None:
     ir_arg_shardings = util.flatten(
-        [[_to_physical_op_sharding(a, s)] * len_ir_types(types)
+        [[_to_physical_op_sharding(ctx, a, s)] * len_ir_types(types)
          for a, s, types in zip(input_avals, arg_shardings, input_types)])
 
   ir_arg_memory_kinds = None
@@ -1293,7 +1313,7 @@ def lower_jaxpr_to_fun(
   ir_result_shardings = None
   if result_shardings is not None:
     ir_result_shardings = util.flatten(
-        [[_to_physical_op_sharding(a, s)] * len_ir_types(types)
+        [[_to_physical_op_sharding(ctx, a, s)] * len_ir_types(types)
          for a, s, types in zip(output_avals, result_shardings, output_types)])
 
   ir_result_memory_kinds = None

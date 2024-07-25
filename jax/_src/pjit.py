@@ -52,7 +52,6 @@ from jax._src.api_util import (
     donation_vector, shaped_abstractify, check_callable, resolve_argnums,
     argnames_partial_except, debug_info, result_paths, jaxpr_debug_info,
     hoist_obj_attrs)
-from jax._src.errors import JAXTypeError
 from jax._src.interpreters import partial_eval as pe
 from jax._src.partition_spec import PartitionSpec
 from jax._src.interpreters import xla
@@ -69,7 +68,7 @@ from jax._src import sharding
 from jax._src.sharding_impls import (
     NamedSharding, GSPMDSharding,
     SingleDeviceSharding, PmapSharding, AUTO, UNSPECIFIED, UnspecifiedValue,
-    ParsedPartitionSpec, SpecSync, get_single_pspec, is_auto, is_unspecified,
+    ParsedPartitionSpec, get_single_pspec, is_unspecified,
     is_unspecified_or_auto, prepare_axis_resources, parse_flatten_op_sharding)
 from jax._src.layout import Layout, DeviceLocalLayout, AutoLayout
 from jax._src.state import discharge as state_discharge, RefEffect, AbstractRef
@@ -491,7 +490,7 @@ def _make_jit_wrapper(fun: Callable, jit_info: PjitInfo):
     p, _ = _infer_params(fun, jit_info, args, kwargs)
     out_s = [None if is_unspecified(s) else s for s in p.params['out_shardings']]
     # TODO(yashkatariya): Add `Layout` to SDS.
-    out = [api.ShapeDtypeStruct(x.shape, x.dtype, x.named_shape, sharding=s)
+    out = [api.ShapeDtypeStruct(x.shape, x.dtype, sharding=s)
            for x, s in zip(p.params['jaxpr'].out_avals, out_s)]
     return tree_unflatten(p.out_tree, out)
 
@@ -1758,9 +1757,6 @@ def _pjit_lower_cached(
     lowering_parameters: mlir.LoweringParameters,
     pgle_profiler: profiler.PGLEProfiler | None):
   if resource_env is not None:
-    pxla.resource_typecheck(jaxpr, resource_env, {}, lambda: "pjit")
-
-  if resource_env is not None:
     mesh = resource_env.physical_mesh
     api_name = 'pjit'
   else:
@@ -1768,25 +1764,15 @@ def _pjit_lower_cached(
     mesh = None
     api_name = 'jit'
 
-  # For `pjit(xmap)` cases, it needs to take the `lower_mesh_computation` path
-  # because `xmap` only supports SPMDAxisContext right now.
-  if dispatch.jaxpr_has_primitive(jaxpr.jaxpr, 'xmap'):
-    return pxla.lower_mesh_computation(
-      jaxpr, api_name, name, mesh,
-      in_shardings, out_shardings, donated_invars,
-      True, jaxpr.in_avals, tiling_method=None,
+  return pxla.lower_sharding_computation(
+      jaxpr, api_name, name, in_shardings, out_shardings,
+      in_layouts, out_layouts, tuple(donated_invars),
+      keep_unused=keep_unused,
+      devices_from_context=(
+          None if mesh is None or mesh.empty else list(mesh.devices.flat)),
       lowering_platforms=lowering_platforms,
-      lowering_parameters=lowering_parameters)
-  else:
-    return pxla.lower_sharding_computation(
-        jaxpr, api_name, name, in_shardings, out_shardings,
-        in_layouts, out_layouts, tuple(donated_invars),
-        keep_unused=keep_unused,
-        devices_from_context=(
-            None if mesh is None or mesh.empty else list(mesh.devices.flat)),
-        lowering_platforms=lowering_platforms,
-        lowering_parameters=lowering_parameters,
-        pgle_profiler=pgle_profiler)
+      lowering_parameters=lowering_parameters,
+      pgle_profiler=pgle_profiler)
 
 
 def pjit_staging_rule(trace, *args, **params):
@@ -1955,19 +1941,14 @@ def _pjit_lowering(ctx, *args, name, jaxpr, in_shardings,
 mlir.register_lowering(pjit_p, _pjit_lowering)
 
 
-def _pjit_batcher(insert_axis, spmd_axis_name,
-                  axis_size, axis_name, main_type,
-                  vals_in, dims_in,
-                  jaxpr, in_shardings, out_shardings, in_layouts, out_layouts,
-                  resource_env, donated_invars, name, keep_unused, inline):
+def _pjit_batcher(spmd_axis_name, axis_size, axis_name, main_type,
+                  vals_in, dims_in, jaxpr, in_shardings, out_shardings,
+                  in_layouts, out_layouts, resource_env, donated_invars, name,
+                  keep_unused, inline):
   segment_lens, dims_in = batching.indirectify_ragged_axes(dims_in)
   new_jaxpr, axes_out = batching.batch_jaxpr2(
       jaxpr, axis_size, dims_in, axis_name=axis_name,
       spmd_axis_name=spmd_axis_name, main_type=main_type)
-
-  # `insert_axis` is set to True only for some `xmap` uses.
-  new_parts = (axis_name,) if insert_axis else (
-      () if spmd_axis_name is None else spmd_axis_name)
 
   if resource_env is not None:
     mesh = resource_env.physical_mesh
@@ -1976,11 +1957,11 @@ def _pjit_batcher(insert_axis, spmd_axis_name,
 
   # TODO(axch): prepend with Nones (?) to account for new segment_lens inputs
   in_shardings = tuple(
-      _pjit_batcher_for_sharding(i, axis_in, new_parts, mesh, aval.ndim)
+      _pjit_batcher_for_sharding(i, axis_in, spmd_axis_name, mesh, aval.ndim)
       if axis_in is not None else i
       for axis_in, i, aval in zip(dims_in, in_shardings, new_jaxpr.in_avals))
   out_shardings = tuple(
-      _pjit_batcher_for_sharding(o, axis_out, new_parts, mesh, aval.ndim)
+      _pjit_batcher_for_sharding(o, axis_out, spmd_axis_name, mesh, aval.ndim)
       if axis_out is not None else o
       for axis_out, o, aval in zip(axes_out, out_shardings, new_jaxpr.out_avals))
   # TODO(yashkatariya): Figure out layouts should change under vmap.
@@ -2005,17 +1986,16 @@ def _pjit_batcher(insert_axis, spmd_axis_name,
       vals_in, vals_out, axes_out)
   return vals_out, resolved_axes_out
 
-batching.spmd_axis_primitive_batchers[pjit_p] = partial(_pjit_batcher, False)
-batching.axis_primitive_batchers[pjit_p] = partial(_pjit_batcher, False, None)
-pxla.spmd_primitive_batchers[pjit_p] = partial(_pjit_batcher, True, None)
+batching.spmd_axis_primitive_batchers[pjit_p] = _pjit_batcher
+batching.axis_primitive_batchers[pjit_p] = partial(_pjit_batcher, None)
 
 def _pjit_batcher_for_sharding(
     s: sharding.Sharding | UnspecifiedValue,
-    dim: int, val: tuple[str, ...], mesh, ndim: int):
+    dim: int, spmd_axis_name: tuple[str, ...] | None, mesh, ndim: int):
   if is_unspecified(s):
     return s
   hlo_s = s._to_xla_hlo_sharding(ndim)  # type: ignore
-  if not val:
+  if spmd_axis_name is None:
     if sharding_impls.is_op_sharding_replicated(hlo_s):
       return s
     new_op = hlo_s.to_proto().clone()
@@ -2031,14 +2011,14 @@ def _pjit_batcher_for_sharding(
       mesh = s.mesh
     if mesh is None or mesh.empty:
       raise ValueError(
-          'If you are using xmap or spmd_axis_name parameter of jax.vmap,'
+          'If you are using spmd_axis_name parameter of jax.vmap,'
           ' please make sure to run your jitted function inside the mesh'
           ' context manager. Only `jax.lax.with_sharding_constraint` with'
           ' `jax.sharding.NamedSharding` as an input can be transformed with'
           ' spmd_axis_name batching rules outside of an explicit mesh context'
           f' manager scope{s!r}')
     parsed_pspec = parse_flatten_op_sharding(hlo_s, mesh)[0]
-    parsed_pspec = parsed_pspec.insert_axis_partitions(dim, val)
+    parsed_pspec = parsed_pspec.insert_axis_partitions(dim, spmd_axis_name)
     return NamedSharding._from_parsed_pspec(mesh, parsed_pspec)
 
 
@@ -2369,66 +2349,6 @@ def dce_jaxpr_pjit_rule(used_outputs: list[bool], eqn: core.JaxprEqn
 pe.dce_rules[pjit_p] = dce_jaxpr_pjit_rule
 
 
-def _check_resources_against_named_axes(what, aval, pos_axis_resources, named_axis_resources):
-  pjit_resources = set(
-      it.chain.from_iterable([d for d in pos_axis_resources if d is not None]))
-  aval_resources = set(it.chain.from_iterable(
-    named_axis_resources[a] for a in aval.named_shape))
-  overlap = pjit_resources & aval_resources
-  if overlap:
-    raise JAXTypeError(
-        f"{what} has an axis resources specification of "
-        f"{pos_axis_resources.unsynced_user_spec(SpecSync.DIM_PERMUTE)} "
-        f"that uses one or more mesh axes already used by xmap to partition "
-        f"a named axis appearing in its named_shape (both use mesh axes "
-        f"{mesh_lib.show_axes(overlap)})")
-
-def _resource_typing_pjit(avals, params, source_info, resource_env, named_axis_resources):
-  jaxpr = params["jaxpr"]
-  what = "pjit input"
-  if (resource_env is not None and params['resource_env'] is not None and
-      resource_env.physical_mesh != params['resource_env'].physical_mesh):
-      raise RuntimeError("Changing the physical mesh is not allowed inside pjit.")
-
-  for aval, s in zip(jaxpr.in_avals, params['in_shardings']):
-    if is_unspecified(s) or is_auto(s):
-      continue
-    elif hasattr(s, '_parsed_pspec'):
-      parsed_pspec = s._parsed_pspec
-    else:
-      if resource_env is not None and not resource_env.physical_mesh.empty:
-        parsed_pspec = parse_flatten_op_sharding(
-            s._to_xla_hlo_sharding(aval.ndim), resource_env.physical_mesh)[0]
-      else:
-        parsed_pspec = None
-    if parsed_pspec is not None:
-      _check_resources_against_named_axes(what, aval, parsed_pspec,
-                                          named_axis_resources)
-
-  pxla.resource_typecheck(
-      jaxpr.jaxpr, resource_env, named_axis_resources,
-      lambda: (f"a pjit'ed function {params['name']} "
-               f"(pjit called at {source_info_util.summarize(source_info)})"))
-
-  what = "pjit output"
-  for aval, s in zip(jaxpr.out_avals, params['out_shardings']):
-    if is_unspecified(s) or is_auto(s):
-      continue
-    elif hasattr(s, '_parsed_pspec'):
-      parsed_pspec = s._parsed_pspec
-    else:
-      if resource_env is not None and not resource_env.physical_mesh.empty:
-        parsed_pspec = parse_flatten_op_sharding(
-            s._to_xla_hlo_sharding(aval.ndim), resource_env.physical_mesh)[0]
-      else:
-        parsed_pspec = None
-    if parsed_pspec is not None:
-      _check_resources_against_named_axes(what, aval, parsed_pspec,
-                                          named_axis_resources)
-
-pxla.custom_resource_typing_rules[pjit_p] = _resource_typing_pjit
-
-
 def _pjit_pp_rule(eqn, context, settings):
   params = dict(eqn.params)
   del params['inline']
@@ -2573,16 +2493,9 @@ def _sharding_constraint_hlo_lowering(ctx, x_node, *, sharding, layout,
   aval, = ctx.avals_in
   out_aval, = ctx.avals_out
   axis_ctx = ctx.module_context.axis_context
-  # axis_ctx and manual_axes is *only used with xmap* and xmap only works with
-  # NamedSharding. So update the NamedSharding to have the manual axes.
-  if isinstance(axis_ctx, sharding_impls.SPMDAxisContext):
-    mesh = resource_env.physical_mesh
-    if mesh.empty and isinstance(sharding, NamedSharding):
-      mesh = sharding.mesh
-    parsed_pspec = parse_flatten_op_sharding(
-        sharding._to_xla_hlo_sharding(aval.ndim), mesh)[0]
-    sharding = NamedSharding._from_parsed_pspec(
-        mesh, parsed_pspec, _manual_axes=axis_ctx.manual_axes)
+  if (isinstance(axis_ctx, sharding_impls.SPMDAxisContext) and
+      axis_ctx.manual_axes):
+    sharding = mlir.add_manual_axes(axis_ctx, sharding, aval.ndim)
   out = mlir.wrap_with_sharding_op(
       ctx, x_node, out_aval, sharding._to_xla_hlo_sharding(aval.ndim).to_proto(),
       unspecified_dims=unconstrained_dims)
@@ -2594,7 +2507,7 @@ mlir.register_lowering(sharding_constraint_p,
 
 
 def _sharding_constraint_batcher(
-    insert_axis, spmd_axis_name, axis_size, axis_name, main_type, vals_in,
+    spmd_axis_name, axis_size, axis_name, main_type, vals_in,
     dims_in, sharding, layout, resource_env, unconstrained_dims):
   if spmd_axis_name is not None and isinstance(sharding, NamedSharding):
     used = {n for ns in sharding.spec
@@ -2605,16 +2518,13 @@ def _sharding_constraint_batcher(
                        f"{sharding.spec}")
   x, = vals_in
   d, = dims_in
-  # None means unconstrained in ParsedPartitionSpec
-  new_parts = (axis_name,) if insert_axis else (
-      None if spmd_axis_name is None else spmd_axis_name)
-  unconstrained_dims = {ud + (d <= ud) for ud in unconstrained_dims}
 
-  if new_parts is None:
+  unconstrained_dims = {ud + (d <= ud) for ud in unconstrained_dims}
+  if spmd_axis_name is None:
     unconstrained_dims.add(d)
 
   vmapped_sharding = _pjit_batcher_for_sharding(
-      sharding, d, new_parts, resource_env.physical_mesh, x.ndim)
+      sharding, d, spmd_axis_name, resource_env.physical_mesh, x.ndim)
   if unconstrained_dims and isinstance(vmapped_sharding, NamedSharding):
     new_spec = list(vmapped_sharding.spec) + [None] * (x.ndim - len(vmapped_sharding.spec))
     for u in unconstrained_dims:
@@ -2633,31 +2543,9 @@ def _sharding_constraint_batcher(
       resource_env=resource_env,
       unconstrained_dims=unconstrained_dims)
   return y, d
-batching.spmd_axis_primitive_batchers[sharding_constraint_p] = partial(
-    _sharding_constraint_batcher, False)
+batching.spmd_axis_primitive_batchers[sharding_constraint_p] = _sharding_constraint_batcher
 batching.axis_primitive_batchers[sharding_constraint_p] = partial(
-    _sharding_constraint_batcher, False, None)
-pxla.spmd_primitive_batchers[sharding_constraint_p] = partial(
-    _sharding_constraint_batcher, True, None)
-
-
-def _resource_typing_sharding_constraint(avals, params, source_info,
-                                         resource_env, named_axis_resources):
-  aval, = avals
-  parsed_pspec = None
-  if isinstance(params['sharding'], NamedSharding):
-    parsed_pspec = params['sharding']._parsed_pspec
-  else:
-    if not resource_env.physical_mesh.empty:
-      parsed_pspec = parse_flatten_op_sharding(
-          params['sharding']._to_xla_hlo_sharding(aval.ndim),
-          resource_env.physical_mesh)[0]
-  if parsed_pspec is not None:
-    _check_resources_against_named_axes(
-      "with_sharding_constraint input", aval, parsed_pspec, named_axis_resources)
-
-pxla.custom_resource_typing_rules[sharding_constraint_p] = \
-    _resource_typing_sharding_constraint
+    _sharding_constraint_batcher, None)
 
 # -------------------- helpers --------------------
 

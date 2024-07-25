@@ -192,7 +192,7 @@ class ArrayImpl(basearray.Array):
     # Don't rearrange if skip_checks is enabled because this assumes that the
     # input buffers are already arranged properly. This usually happens when
     # Array's are created as output of a JAX transformation
-    # (like pjit, xmap, etc).
+    # (like pjit, etc).
     if not _skip_checks or config.enable_checks.value:
       self._check_and_rearrange()
 
@@ -466,8 +466,7 @@ class ArrayImpl(basearray.Array):
 
   def __reduce__(self):
     fun, args, arr_state = self._value.__reduce__()
-    aval_state = {'weak_type': self.aval.weak_type,
-                  'named_shape': self.aval.named_shape}
+    aval_state = {'weak_type': self.aval.weak_type}
     return (_reconstruct_array, (fun, args, arr_state, aval_state))
 
   @use_cpp_method()

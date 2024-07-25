@@ -59,8 +59,7 @@ from jax._src.interpreters.batching import RaggedAxis
 from jax._src.lax import slicing
 from jax._src.lax.utils import (
   _input_dtype, dtype_to_string, standard_abstract_eval,
-  standard_multi_result_abstract_eval, standard_named_shape_rule,
-  standard_primitive)
+  standard_multi_result_abstract_eval, standard_primitive)
 from jax._src import xla_bridge
 from jax._src.lib import xla_client
 from jax._src.lib.mlir import ir
@@ -838,6 +837,8 @@ def broadcast(operand: ArrayLike, sizes: Sequence[int]) -> Array:
   See Also:
     jax.lax.broadcast_in_dim : add new dimensions at any location in the array shape.
   """
+  if len(sizes) == 0:
+    return asarray(operand)
   dims = tuple(range(len(sizes), len(sizes) + np.ndim(operand)))
   return broadcast_in_dim(operand, tuple(sizes) + np.shape(operand), dims)
 
@@ -872,9 +873,12 @@ def broadcast_in_dim(operand: ArrayLike, shape: Shape,
       operand, *dyn_shape, shape=tuple(static_shape),
       broadcast_dimensions=tuple(broadcast_dimensions))
 
-def broadcast_to_rank(x: Array, rank: int) -> Array:
+def broadcast_to_rank(x: ArrayLike, rank: int) -> Array:
   """Adds leading dimensions of ``1`` to give ``x`` rank ``rank``."""
-  return broadcast(x, (1,) * (rank - x.ndim))
+  ndim = np.ndim(x)
+  if ndim == rank:
+    return asarray(x)
+  return broadcast(x, (1,) * (rank - ndim))
 
 def reshape(operand: ArrayLike, new_sizes: Shape,
             dimensions: Sequence[int] | None = None) -> Array:
@@ -2563,7 +2567,7 @@ convert_element_type_p.def_impl(partial(dispatch.apply_primitive, convert_elemen
 convert_element_type_p.def_abstract_eval(
     partial(standard_abstract_eval, convert_element_type_p,
             _convert_element_type_shape_rule, _convert_element_type_dtype_rule,
-            _convert_element_type_weak_type_rule, standard_named_shape_rule))
+            _convert_element_type_weak_type_rule))
 ad.defjvp(convert_element_type_p, _convert_element_type_jvp_rule)
 ad.primitive_transposes[convert_element_type_p] = _convert_element_type_transpose_rule
 batching.defvectorized(convert_element_type_p)
@@ -3360,7 +3364,7 @@ def _broadcast_in_dim_abstract_eval(x, *dyn_shape, shape, broadcast_dimensions):
               type(core.get_aval(d).dtype) is core.bint for d in shape)):
     shape = _broadcast_in_dim_shape_rule(  # error checking
         x, shape=shape, broadcast_dimensions=broadcast_dimensions)
-    return core.ShapedArray(shape, x.dtype, x.weak_type, x.named_shape)
+    return core.ShapedArray(shape, x.dtype, x.weak_type)
   # If any BInts in shape, or Tracers in dyn_shape, produce a DShapedArray
   # (even if x is a ShapedArray)
   # TODO(mattjj): unify DShapedArray with ShapedArray, and remove this code
@@ -4057,25 +4061,12 @@ def _reduce_jvp_rule(primals, tangents, *, computation, jaxpr, dimensions):
   reducer = core.jaxpr_as_fun(jaxpr)
   return _reduce_jvp(reducer, init_values, primal_xs, tangent_xs, dimensions)
 
-def _reduce_named_shape_rule(*avals, computation, jaxpr, dimensions):
-  # TODO(mattjj,frostig): see the TODOs noting limitations/assumptions in
-  # _reduce_batching_rule. We're making the same assumptions here for now.
-  num_operands = len(avals) // 2
-  operand_avals, init_avals = split_list(avals, [num_operands])
-  if any(a.named_shape for a in init_avals):
-    raise NotImplementedError
-  named_shapes = [a.named_shape for a in operand_avals]
-  join = core.join_named_shapes(*(a.named_shape for a in operand_avals))
-  return [join] * len(named_shapes)
-
-
 reduce_p = core.Primitive('reduce')
 reduce_p.multiple_results = True
 reduce_p.def_impl(partial(dispatch.apply_primitive, reduce_p))
 reduce_p.def_abstract_eval(
     partial(standard_multi_result_abstract_eval, reduce_p, _reduce_shape_rule,
-            _reduce_dtype_rule, _reduce_weak_type_rule,
-            _reduce_named_shape_rule))
+            _reduce_dtype_rule, _reduce_weak_type_rule))
 batching.primitive_batchers[reduce_p] = _reduce_batch_rule
 ad.primitive_jvps[reduce_p] = _reduce_jvp_rule
 
@@ -4839,9 +4830,6 @@ def _rng_bit_generator_lowering(
   return [out_key, out_vals]
 
 
-def _rng_bit_generator_named_shape_rule(key, *, shape, dtype, algorithm):
-  return [key.named_shape, key.named_shape]
-
 rng_bit_generator_p = Primitive("rng_bit_generator")
 rng_bit_generator_p.multiple_results = True
 rng_bit_generator_p.def_impl(
@@ -4849,8 +4837,7 @@ rng_bit_generator_p.def_impl(
 rng_bit_generator_p.def_abstract_eval(
     partial(standard_multi_result_abstract_eval, rng_bit_generator_p,
             _rng_bit_generator_shape_rule, _rng_bit_generator_dtype_rule,
-            _rng_bit_generator_weak_type_rule,
-            _rng_bit_generator_named_shape_rule))
+            _rng_bit_generator_weak_type_rule))
 mlir.register_lowering(rng_bit_generator_p,
                        _rng_bit_generator_lowering)
 
