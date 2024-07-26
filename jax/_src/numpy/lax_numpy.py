@@ -2316,6 +2316,7 @@ def array_split(ary: ArrayLike, indices_or_sections: int | Sequence[int] | Array
                 axis: int = 0) -> list[Array]:
   return _split("array_split", ary, indices_or_sections, axis=axis)
 
+deprecations.register("jax-numpy-clip-complex")
 
 @jit
 def clip(
@@ -2377,14 +2378,14 @@ def clip(
   util.check_arraylike("clip", arr)
   if any(jax.numpy.iscomplexobj(t) for t in (arr, min, max)):
     # TODO(micky774): Deprecated 2024-4-2, remove after deprecation expires.
-    warnings.warn(
+    deprecations.warn(
+      "jax-numpy-clip-complex",
       "Clip received a complex value either through the input or the min/max "
       "keywords. Complex values have no ordering and cannot be clipped. "
       "Attempting to clip using complex numbers is deprecated and will soon "
       "raise a ValueError. Please convert to a real value or array by taking "
       "the real or imaginary components via jax.numpy.real/imag respectively.",
-      DeprecationWarning, stacklevel=2,
-    )
+      stacklevel=2)
   if min is not None:
     arr = ufuncs.maximum(min, arr)
   if max is not None:
@@ -3476,15 +3477,46 @@ def _convert_to_array_if_dtype_fails(x: ArrayLike) -> ArrayLike:
     return x
 
 
-@util.implements(getattr(np, "astype", None), lax_description="""
-This is implemented via :func:`jax.lax.convert_element_type`, which may
-have slightly different behavior than :func:`numpy.astype` in some cases.
-In particular, the details of float-to-int and int-to-float casts are
-implementation dependent.
-""")
+deprecations.register("jax-numpy-astype-complex-to-real")
+
 def astype(x: ArrayLike, dtype: DTypeLike | None,
            /, *, copy: bool = False,
            device: xc.Device | Sharding | None = None) -> Array:
+  """Convert an array to a specified dtype.
+
+  JAX imlementation of :func:`numpy.astype`.
+
+  This is implemented via :func:`jax.lax.convert_element_type`, which may
+  have slightly different behavior than :func:`numpy.astype` in some cases.
+  In particular, the details of float-to-int and int-to-float casts are
+  implementation dependent.
+
+  Args:
+    x: input array to convert
+    dtype: output dtype
+    copy: if True, then always return a copy. If False (default) then only
+      return a copy if necessary.
+    device: optionally specify the device to which the output will be committed.
+
+  Returns:
+    An array with the same shape as ``x``, containing values of the specified
+    dtype.
+
+  See Also:
+    - :func:`jax.lax.convert_element_type`: lower-level function for XLA-style
+      dtype conversions.
+
+  Examples:
+    >>> x = jnp.array([0, 1, 2, 3])
+    >>> x
+    Array([0, 1, 2, 3], dtype=int32)
+    >>> x.astype('float32')
+    Array([0.0, 1.0, 2.0, 3.0], dtype=float32)
+
+    >>> y = jnp.array([0.0, 0.5, 1.0])
+    >>> y.astype(int)  # truncates fractional values
+    Array([0, 0, 1], dtype=int32)
+  """
   util.check_arraylike("astype", x)
   x_arr = asarray(x)
 
@@ -3493,12 +3525,12 @@ def astype(x: ArrayLike, dtype: DTypeLike | None,
   dtypes.check_user_dtype_supported(dtype, "astype")
   if issubdtype(x_arr.dtype, complexfloating):
     if dtypes.isdtype(dtype, ("integral", "real floating")):
-      warnings.warn(
+      deprecations.warn(
+        "jax-numpy-astype-complex-to-real",
         "Casting from complex to real dtypes will soon raise a ValueError. "
         "Please first use jnp.real or jnp.imag to take the real/imaginary "
         "component of your input.",
-        DeprecationWarning, stacklevel=2
-      )
+        stacklevel=2)
     elif np.dtype(dtype) == bool:
       # convert_element_type(complex, bool) has the wrong semantics.
       x_arr = (x_arr != _lax_const(x_arr, 0))
@@ -3507,17 +3539,9 @@ def astype(x: ArrayLike, dtype: DTypeLike | None,
   # to issue our warning.
   with warnings.catch_warnings():
     warnings.simplefilter("ignore", ComplexWarning)
-    return _place_array(
-      lax.convert_element_type(x_arr, dtype),
-      device=device, copy=copy,
-    )
-
-def _place_array(x, device=None, copy=None):
-  # TODO(micky774): Implement in future PRs as we formalize device placement
-  # semantics
-  if copy:
-    return _array_copy(x)
-  return x
+    result = lax_internal._convert_element_type(
+      x_arr, dtype, sharding=_normalize_to_sharding(device))
+  return _array_copy(result) if copy else result
 
 
 @util.implements(np.asarray, lax_description=_ARRAY_DOC)
@@ -4656,11 +4680,12 @@ def repeat(a: ArrayLike, repeats: ArrayLike, axis: int | None = None, *,
     # Fast path for when repeats is a scalar.
     if np.ndim(repeats) == 0 and ndim(a) != 0:
       input_shape = shape(a)
-      aux_axis = axis if axis < 0 else axis + 1
-      a = expand_dims(a, aux_axis)
-      reps: list[DimSize] = [1] * len(shape(a))
-      reps[aux_axis] = repeats
-      a = tile(a, reps)
+      axis = _canonicalize_axis(axis, len(input_shape))
+      aux_axis = axis + 1
+      aux_shape: list[DimSize] = list(input_shape)
+      aux_shape.insert(aux_axis, operator.index(repeats) if core.is_constant_dim(repeats) else repeats)  # type: ignore
+      a = lax.broadcast_in_dim(
+        a, aux_shape, [i for i in range(len(aux_shape)) if i != aux_axis])
       result_shape: list[DimSize] = list(input_shape)
       result_shape[axis] *= repeats
       return reshape(a, result_shape)
@@ -5069,16 +5094,118 @@ def tril_indices(n: int, k: int = 0, m: int | None = None) -> tuple[Array, Array
   return i, j
 
 
-@util.implements(np.triu_indices_from)
 def triu_indices_from(arr: ArrayLike, k: int = 0) -> tuple[Array, Array]:
+  """Return the indices of upper triangle of a given array.
+
+  JAX implementation of :func:`numpy.triu_indices_from`.
+
+  Args:
+    arr: input array. Must have ``arr.ndim == 2``.
+    k: optional, int, default=0. Specifies the sub-diagonal on and above which
+      the indices of upper triangle are returned. ``k=0`` refers to main diagonal,
+      ``k<0`` refers to sub-diagonal below the main diagonal and ``k>0`` refers
+      to sub-diagonal above the main diagonal.
+
+  Returns:
+    A tuple of two arrays containing the indices of the upper triangle, one along
+    each axis.
+
+  See also:
+    - :func:`jax.numpy.tril_indices_from`: Returns the indices of lower triangle
+      of a given array.
+    - :func:`jax.numpy.triu_indices`: Returns the indices of upper triangle of an
+      array of size ``(n, m)``.
+    - :func:`jax.numpy.triu`: Return an upper triangle of an array.
+
+  Examples:
+    >>> arr = jnp.array([[1, 2, 3],
+    ...                  [4, 5, 6],
+    ...                  [7, 8, 9]])
+    >>> jnp.triu_indices_from(arr)
+    (Array([0, 0, 0, 1, 1, 2], dtype=int32), Array([0, 1, 2, 1, 2, 2], dtype=int32))
+
+    Elements indexed by ``jnp.triu_indices_from`` correspond to those in the
+    output of ``jnp.triu``.
+
+    >>> ind = jnp.triu_indices_from(arr)
+    >>> arr[ind]
+    Array([1, 2, 3, 5, 6, 9], dtype=int32)
+    >>> jnp.triu(arr)
+    Array([[1, 2, 3],
+           [0, 5, 6],
+           [0, 0, 9]], dtype=int32)
+
+    When ``k > 0``:
+
+    >>> jnp.triu_indices_from(arr, k=1)
+    (Array([0, 0, 1], dtype=int32), Array([1, 2, 2], dtype=int32))
+
+    When ``k < 0``:
+
+    >>> jnp.triu_indices_from(arr, k=-1)
+    (Array([0, 0, 0, 1, 1, 1, 2, 2], dtype=int32), Array([0, 1, 2, 0, 1, 2, 1, 2], dtype=int32))
+  """
   arr_shape = shape(arr)
-  return triu_indices(arr_shape[-2], k=k, m=arr_shape[-1])
+  if len(arr_shape) != 2:
+    raise ValueError("Only 2-D inputs are accepted")
+  return triu_indices(arr_shape[0], k=k, m=arr_shape[1])
 
 
-@util.implements(np.tril_indices_from)
 def tril_indices_from(arr: ArrayLike, k: int = 0) -> tuple[Array, Array]:
+  """Return the indices of lower triangle of a given array.
+
+  JAX implementation of :func:`numpy.tril_indices_from`.
+
+  Args:
+    arr: input array. Must have ``arr.ndim == 2``.
+    k: optional, int, default=0. Specifies the sub-diagonal on and below which
+      the indices of upper triangle are returned. ``k=0`` refers to main diagonal,
+      ``k<0`` refers to sub-diagonal below the main diagonal and ``k>0`` refers
+      to sub-diagonal above the main diagonal.
+
+  Returns:
+    A tuple of two arrays containing the indices of the lower triangle, one along
+    each axis.
+
+  See also:
+    - :func:`jax.numpy.triu_indices_from`: Returns the indices of upper triangle
+      of a given array.
+    - :func:`jax.numpy.tril_indices`: Returns the indices of lower triangle of an
+      array of size ``(n, m)``.
+    - :func:`jax.numpy.tril`: Returns a lower triangle of an array
+
+  Examples:
+    >>> arr = jnp.array([[1, 2, 3],
+    ...                  [4, 5, 6],
+    ...                  [7, 8, 9]])
+    >>> jnp.tril_indices_from(arr)
+    (Array([0, 1, 1, 2, 2, 2], dtype=int32), Array([0, 0, 1, 0, 1, 2], dtype=int32))
+
+    Elements indexed by ``jnp.tril_indices_from`` correspond to those in the
+    output of ``jnp.tril``.
+
+    >>> ind = jnp.tril_indices_from(arr)
+    >>> arr[ind]
+    Array([1, 4, 5, 7, 8, 9], dtype=int32)
+    >>> jnp.tril(arr)
+    Array([[1, 0, 0],
+           [4, 5, 0],
+           [7, 8, 9]], dtype=int32)
+
+    When ``k > 0``:
+
+    >>> jnp.tril_indices_from(arr, k=1)
+    (Array([0, 0, 1, 1, 1, 2, 2, 2], dtype=int32), Array([0, 1, 0, 1, 2, 0, 1, 2], dtype=int32))
+
+    When ``k < 0``:
+
+    >>> jnp.tril_indices_from(arr, k=-1)
+    (Array([1, 2, 2], dtype=int32), Array([0, 0, 1], dtype=int32))
+  """
   arr_shape = shape(arr)
-  return tril_indices(arr_shape[-2], k=k, m=arr_shape[-1])
+  if len(arr_shape) != 2:
+    raise ValueError("Only 2-D inputs are accepted")
+  return tril_indices(arr_shape[0], k=k, m=arr_shape[1])
 
 
 @util.implements(np.fill_diagonal, lax_description="""
