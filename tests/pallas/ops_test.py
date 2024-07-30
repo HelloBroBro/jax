@@ -94,13 +94,14 @@ class OpsTest(PallasBaseTest):
   )
   def test_weak_dtype(self, fn, dtype):
     @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct([1], dtype),
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8, 128), dtype),
     )
     def kernel(x_ref, o_ref):
-      o_ref[:] = fn(x_ref[:], y)
+      o_ref[...] = fn(x_ref[...], y)
 
-    x = jnp.array([4], dtype=dtype)
-    y = 2 if jnp.issubdtype(dtype, jnp.integer) else 2.0
+    x = jnp.full((8, 128), 4, dtype=dtype)
+    y = jnp.full((8, 128), 2 if jnp.issubdtype(dtype, jnp.integer) else 2.0,
+                 dtype=dtype)
     np.testing.assert_allclose(kernel(x), fn(x, y))
 
   @parameterized.named_parameters(
@@ -294,6 +295,22 @@ class OpsTest(PallasBaseTest):
 
 class OpsInterpreterTest(OpsTest):
   INTERPRET = True
+
+  def test_debug_print(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
+        grid=1,
+    )
+    def kernel(x_ref, o_ref):
+      jax.debug.print("x = {}", x_ref)
+
+    x = jnp.array([4.2, 2.4]).astype(jnp.float32)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+      jax.effects_barrier()
+
+    self.assertIn("x = [4.2 2.4]", output())
 
 
 class OpsExtraTest(PallasBaseTest):
@@ -1185,12 +1202,12 @@ class TpuOpsTest(PallasBaseTest):
     @functools.partial(
         pl.pallas_call,
         # TODO(ayx): add float64 support for `erf_inv`
-        out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
+        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
     )
     def kernel(x_ref, o_ref):
       o_ref[...] = lax.erf_inv(x_ref[...])
 
-    x = jnp.full((4,), x)
+    x = jnp.full((8, 128), x)
     out = kernel(x)
     expected = lax.erf_inv(x)
     np.testing.assert_array_equal(out, expected)
@@ -1210,12 +1227,12 @@ class TpuOpsTest(PallasBaseTest):
     @jax.jit
     @functools.partial(
         pl.pallas_call,
-        out_shape=jax.ShapeDtypeStruct((4,), dtype),
+        out_shape=jax.ShapeDtypeStruct((8, 128), dtype),
     )
     def kernel(x_ref, o_ref):
       o_ref[...] = jnp.sign(x_ref[...])
 
-    x = jnp.full((4,), value, dtype=dtype)
+    x = jnp.full((8, 128,), value, dtype=dtype)
     out = kernel(x)
     expected = jnp.sign(x)
     np.testing.assert_array_equal(out, expected)
