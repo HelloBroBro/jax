@@ -72,6 +72,7 @@ from jax.numpy import (
     broadcast_to as broadcast_to,
     can_cast as can_cast,
     ceil as ceil,
+    clip as clip,
     complex128 as complex128,
     complex64 as complex64,
     concat as concat,
@@ -100,6 +101,7 @@ from jax.numpy import (
     full_like as full_like,
     greater as greater,
     greater_equal as greater_equal,
+    hypot as hypot,
     iinfo as iinfo,
     imag as imag,
     inf as inf,
@@ -148,6 +150,7 @@ from jax.numpy import (
     real as real,
     remainder as remainder,
     repeat as repeat,
+    reshape as reshape,
     result_type as result_type,
     roll as roll,
     round as round,
@@ -188,15 +191,6 @@ from jax.numpy import (
     zeros_like as zeros_like,
 )
 
-from jax.experimental.array_api._manipulation_functions import (
-    reshape as reshape,
-)
-
 from jax.experimental.array_api._data_type_functions import (
     astype as astype,
-)
-
-from jax.experimental.array_api._elementwise_functions import (
-    clip as clip,
-    hypot as hypot,
 )

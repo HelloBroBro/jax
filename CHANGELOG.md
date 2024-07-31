@@ -6,9 +6,19 @@ see {ref}`pallas-changelog`.
 
 <!--
 Remember to align the itemized text with the first line of an item within a list.
+
+When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.md.
 -->
 
 ## jax 0.4.32
+
+* Breaking changes
+  * The MHLO MLIR dialect (`jax.extend.mlir.mhlo`) has been removed. Use the
+    `stablehlo` dialect instead.
+
+* Deprecations
+  * Complex inputs to {func}`jax.numpy.clip` and {func}`jax.numpy.hypot` are
+    no longer allowed, after being deprecated since JAX v0.4.27.
 
 ## jaxlib 0.4.32
 
