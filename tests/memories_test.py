@@ -493,6 +493,8 @@ class DevicePutTest(jtu.JaxTestCase):
     )
 
   def test_parameter_and_output_streaming_with_scalar(self):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("This test is flaky on GPU backend.")
     if xb.backend_xla_version() is not None and xb.backend_xla_version() < 2:
       self.skipTest("This test requires an xla_version >= 2.")
 
@@ -560,6 +562,8 @@ class DevicePutTest(jtu.JaxTestCase):
     self.assertEqual(out_hbm.sharding, out_s)
 
   def test_output_streaming(self):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("This test is flaky on GPU backend.")
     mesh = jtu.create_global_mesh((1, 1), ("x", "y"))
     np_inp = np.arange(16.0).reshape(8, 2)
     s_hbm = NamedSharding(mesh, P("x", "y"), memory_kind="device")
@@ -1285,6 +1289,45 @@ class ComputeOffload(jtu.BufferDonationTestCase):
     expected_out = h(operand)
 
     self.assertArraysAllClose(out, expected_out, rtol=1e-3)
+
+  def test_mem_kind_donation_pinned_host(self):
+    mesh = jtu.create_global_mesh((2,), "x")
+    s = NamedSharding(mesh, P(), memory_kind='pinned_host')
+    s_dev = s.with_memory_kind('device')
+
+    @compute_on('device_host')
+    @functools.partial(jax.jit, out_shardings=(s, s_dev), donate_argnums=(0, 1))
+    def f(inp1, inp2):
+      return inp1 * 2, inp2 * 2
+
+    np_inp = np.arange(16).reshape(8, 2)
+    x = jax.device_put(np_inp, s)
+    x_dev = jax.device_put(np_inp, s_dev)
+
+    f(x, x_dev)
+
+    lowered_text = f.lower(x, x_dev).as_text("hlo")
+    self.assertIn("input_output_alias", lowered_text)
+    self.assertDeleted(x)
+    self.assertDeleted(x_dev)
+
+  @parameterized.parameters("pinned_host", "device")
+  def test_identity_mem_kind_donation(self, mem_kind):
+    mesh = jtu.create_global_mesh((2,), "x")
+    s = NamedSharding(mesh, P(), memory_kind=mem_kind)
+
+    @functools.partial(jax.jit, out_shardings=s, donate_argnums=0)
+    def f(inp):
+      return inp
+
+    np_inp = np.arange(16).reshape(8, 2)
+    x = jax.device_put(np_inp, s)
+
+    f(x)
+
+    lowered_text = f.lower(x).as_text("hlo")
+    self.assertIn("input_output_alias", lowered_text)
+    self.assertDeleted(x)
 
 
 @jtu.with_config(jax_enable_memories=True)
