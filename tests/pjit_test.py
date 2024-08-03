@@ -2516,6 +2516,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     mesh = jtu.create_global_mesh((2, 1), ('x', 'y'))
     with mesh:
       out = pjit(lambda: 1)()
+    self.assertEqual(out.sharding, NamedSharding(mesh, P()))
     self.assertIsInstance(out, array.ArrayImpl)
     self.assertEqual(out, 1)
 
@@ -2873,6 +2874,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
       f = pjit(mul, device=jax.devices()[1])
+
     x = jnp.arange(8).reshape(4, 2)
     f_out = f(x)
     f_out2 = f(f_out)
@@ -4296,6 +4298,24 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     out = f()
     self.assertEqual(out.sharding, s)
+
+  @jtu.run_on_devices('tpu', 'gpu')
+  def test_aot_device_mismatch(self):
+    mesh = jtu.create_global_mesh((1,), 'x')
+    np_inp = np.arange(8)
+    arr = jax.device_put(np_inp, NamedSharding(mesh, P()))
+
+    @jax.jit
+    def f(x):
+      return x * 2
+
+    compiled = f.lower(arr).compile()
+
+    cpu_arr = jax.device_put(np_inp, jax.devices('cpu')[0])
+    with self.assertRaisesRegex(
+        ValueError,
+        "Compiled object called with input sharding.*does not match"):
+      compiled(cpu_arr)
 
 
 def spec_regex(s):
