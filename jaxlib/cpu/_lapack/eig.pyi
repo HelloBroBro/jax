@@ -1,4 +1,4 @@
-# Copyright 2018 The JAX Authors.
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ruff: noqa: F401
-from jax._src.lib import (
-  version_str as __version__,
-)
-from jax.lib import (
-  xla_bridge as xla_bridge,
-  xla_client as xla_client,
-  xla_extension as xla_extension,
-)
+import enum
+from typing import ClassVar
+
+
+class ComputationMode(enum.Enum):
+  kComputeEigenvectors: ClassVar[ComputationMode] = ...
+  kNoEigenvectors: ClassVar[ComputationMode] = ...

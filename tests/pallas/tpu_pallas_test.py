@@ -1487,18 +1487,34 @@ class PallasCallTest(PallasBaseTest):
     f = self.pallas_call(
         kernel,
         out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
-        compiler_params=dict(
-            mosaic=dict(
-                cost_estimate=pltpu.CostEstimate(
-                    flops=1234, transcendentals=21, bytes_accessed=12345
-                )
-            )
+        cost_estimate=pl.CostEstimate(
+            flops=1234, transcendentals=21, bytes_accessed=12345
         ),
     )
     (analysis_result,) = jax.jit(f).lower(x).compile().cost_analysis()
     self.assertEqual(analysis_result['flops'], 1234)
     self.assertEqual(analysis_result['transcendentals'], 21)
     self.assertEqual(analysis_result['bytes accessed'], 12345)
+
+
+  def test_cost_analysis_vmap(self):
+    def kernel(x, y):
+      y[:] = x[:]
+    batch_size = 3
+    x = jnp.arange(batch_size * 1024.).reshape(batch_size, 8, 128)
+    f = pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+        cost_estimate=pl.CostEstimate(
+            flops=1234, transcendentals=21, bytes_accessed=12345
+        ),
+    )
+    f = jax.vmap(f)
+    (analysis_result,) = jax.jit(f).lower(x).compile().cost_analysis()
+    self.assertEqual(analysis_result['flops'], batch_size * 1234)
+    self.assertEqual(analysis_result['transcendentals'], batch_size * 21)
+    self.assertEqual(analysis_result['bytes accessed'], batch_size * 12345)
+
 
   def test_vmem_limit(self):
     shape = (128, 128)
@@ -1884,10 +1900,6 @@ class PallasCallPrintTest(PallasBaseTest):
 
 class PallasCallTraceTest(PallasBaseTest):
 
-  def parse_debug_string(self, debug_string):
-    jaxpr, mlir = debug_string.split('module')
-    return {'jaxpr': jaxpr, 'mlir': mlir}
-
   def test_trace_start_stop_match(self):
     def kernel(o_ref):
       with jax.named_scope('scope1'):
@@ -1900,10 +1912,10 @@ class PallasCallTraceTest(PallasBaseTest):
         debug=True,
       )()
       # TODO(justinfu): Add an official lowering API to get the MLIR.
-      mlir = self.parse_debug_string(msg.getvalue())['mlir']
+      debug_string = msg.getvalue()
 
-    num_start = mlir.count('tpu.trace_start')
-    num_stop = mlir.count('tpu.trace_stop')
+    num_start = debug_string.count('tpu.trace_start')
+    num_stop = debug_string.count('tpu.trace_stop')
     self.assertEqual(num_start, 1)
     self.assertEqual(num_stop, 1)
 
@@ -1926,10 +1938,10 @@ class PallasCallTraceTest(PallasBaseTest):
         debug=True,
       )()
       # TODO(justinfu): Add an official lowering API to get the MLIR.
-      mlir = self.parse_debug_string(msg.getvalue())['mlir']
+      debug_string = msg.getvalue()
 
-    num_start = mlir.count('tpu.trace_start')
-    num_stop = mlir.count('tpu.trace_stop')
+    num_start = debug_string.count('tpu.trace_start')
+    num_stop = debug_string.count('tpu.trace_stop')
     self.assertEqual(num_start, 2)
     self.assertEqual(num_stop, 2)
 
