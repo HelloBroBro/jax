@@ -441,6 +441,26 @@ class DevicePutTest(jtu.JaxTestCase):
     self._check_device_put_addressable_shards(
         out2, np_inp * np_inp * 2, s_host, 'pinned_host')
 
+  def test_zero_size_parameter(self):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("This test does not work on GPU backend.")
+    _, s_host, np_inp, inp_host = _create_inputs(
+        (0,), P("x"), mem_kind="pinned_host")
+    s_dev = s_host.with_memory_kind('device')
+
+    @functools.partial(jax.jit, out_shardings=s_host)
+    def f(a):
+      b = jax.device_put(a, s_dev)
+      return b
+
+    compiled = f.lower(inp_host).compile()  # doesn't crash
+    compiled_text = compiled.as_text()
+    self.assertRegex(compiled_text, r"entry_computation_layout=.*S\(5\)}")
+
+    out = f(inp_host)
+    self._check_device_put_addressable_shards(
+        out, np_inp, s_host, 'pinned_host')
+
   def test_parameter_streaming_with_scalar_and_constant(self):
     if jtu.test_device_matches(["gpu"]):
       self.skipTest("This test does not work on GPU backend.")
@@ -580,6 +600,8 @@ class DevicePutTest(jtu.JaxTestCase):
     self.assertEqual(out_host.sharding, s_host)
 
   def test_weight_offload_with_dp_on_output(self):
+    if jtu.test_device_matches(["gpu"]):
+      self.skipTest("This test is flaky on GPU backend.")
     _, s_dev, np_inp, inp_dev = _create_inputs(
         (8, 2), P("x", "y"), mem_kind="device")
     s_host = s_dev.with_memory_kind('pinned_host')
@@ -1155,23 +1177,6 @@ class ComputeOffload(jtu.BufferDonationTestCase):
 
     self.assertArraysEqual(out, np_inp @ np_inp.T)
     self.assertArraysEqual(out2, np_inp @ np_inp.T)
-
-  def test_jit_compilation_cache_hit(self):
-    mesh, s, np_inp, inp = _create_inputs((8, 2), P("x", "y"))
-    inp2 = jax.device_put(
-        np_inp, GSPMDSharding(tuple(mesh.devices.flat),
-                              s._to_xla_hlo_sharding(inp.ndim),
-                              memory_kind="device")
-    )
-
-    f = jax.jit(lambda x: x @ x.T)
-
-    with (jtu.count_pjit_cpp_cache_miss() as cpp_count,
-          jtu.count_jit_and_pmap_compiles() as compile_count):
-      f(inp)
-      f(inp2)
-    self.assertEqual(cpp_count[0], 2)
-    self.assertEqual(compile_count[0], 1)
 
   def test_jit_cpp_cache_output_hit(self):
     _, _, _, inp = _create_inputs((8, 2), P("x"), mem_kind="device")

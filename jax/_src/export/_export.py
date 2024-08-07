@@ -935,6 +935,7 @@ _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     "lapack_ssyevd", "lapack_dsyevd", "lapack_cheevd", "lapack_zheevd",
     # eigh on GPU
     "cusolver_syevj", "cusolver_syevd",
+    "hipsolver_syevj", "hipsolver_syevd",
     # eigh on TPU
     "Eigh",
     # eig on CPU
@@ -948,6 +949,8 @@ _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     # qr on GPU
     "cusolver_geqrf", "cublas_geqrf_batched",
     "cusolver_orgqr",
+    "hipsolver_geqrf", "hipblas_geqrf_batched",
+    "hipsolver_orgqr",
     # qr and svd on TPU
     "Qr", "ProductOfElementaryHouseholderReflectors",
     # triangular_solve on CPU
@@ -960,6 +963,9 @@ _CUSTOM_CALL_TARGETS_GUARANTEED_STABLE = {
     # # lu on GPU
     # "cublas_getrf_batched", "cusolver_getrf",
     # "hipblas_getrf_batched", "hipsolver_getrf",
+    # TODO(b/357034884): This can be added once the mimimum version of jaxlib
+    # (v0.4.32) includes this new FFI call.
+    # "cusolver_getrf_ffi",
     # lu on TPU
     "LuDecomposition",
     # ApproxTopK on TPU
