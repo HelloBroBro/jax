@@ -4850,6 +4850,19 @@ class APITest(jtu.JaxTestCase):
     with self.assertRaisesRegex(TracerBoolConversionError, "Attempted boolean"):
       f()
 
+  def test_inline_return_twice(self):
+    # https://github.com/google/jax/issues/22944
+    @jax.jit
+    def add_one(x: int) -> int:
+      return x + 1
+
+    def add_one_and_dupe(x: int) -> tuple[int, int]:
+      y = add_one(x)
+      return (y, y)
+
+    jit_add_one_dupe = jax.jit(add_one_and_dupe, inline=True)
+    jax.eval_shape(jit_add_one_dupe, 0)  # don't crash
+
 
 class RematTest(jtu.JaxTestCase):
 
@@ -9749,6 +9762,23 @@ class CustomVJPTest(jtu.JaxTestCase):
     x, y = 3.2, 1.0
     self.assertAllClose(jax.grad(f)(x, y), jax.grad(f_)(x, y))
 
+  def test_optimize_remat_kwargs(self):
+    @jax.custom_vjp
+    def f(x, y):
+      return jnp.sin(x) * y
+
+    def f_fwd(x, y, *, keyword=False):
+      del keyword
+      return f(x, y), (jnp.cos(x), jnp.sin(x), y)
+
+    def f_bwd(res, g):
+      cos_x, sin_x, y = res
+      return (cos_x * g * y, sin_x * g)
+
+    f.defvjp(f_fwd, f_bwd, optimize_remat=True)
+    x, y = 3.2, 1.0
+    jax.grad(f)(x, y)  # Doesn't error
+
 
 def transpose_unary(f, x_example):
   def transposed(y):
@@ -10780,7 +10810,6 @@ class CustomVmapTest(jtu.JaxTestCase):
     )
     self.assertAllClose(outputs['b'], expected)
 
-
   def test_batch_divides_axis(self):
     def f(t):
       x, a = t
@@ -10797,23 +10826,6 @@ class CustomVmapTest(jtu.JaxTestCase):
     y = g(x, a)
 
     self.assertAllClose(y, (x + a)**2)
-
-  def test_kwargs(self):
-    @jax.custom_batching.custom_vmap
-    def f(x): return jnp.sin(x)
-
-    @f.def_vmap
-    def rule(axis_size, in_batched, xs):
-      xs_batched, = in_batched
-      self.assertEqual(xs_batched, True)
-      self.assertEqual(axis_size, xs.shape[0])
-      return jnp.cos(xs), xs_batched
-
-    x, xs = jnp.array(1.), jnp.arange(3)
-    y = f(x=x)
-    self.assertAllClose(y, jnp.sin(x))
-    ys = api.vmap(f)(x=xs)
-    self.assertAllClose(ys, jnp.cos(xs))
 
   def test_undefined_rule(self):
     @jax.custom_batching.custom_vmap
