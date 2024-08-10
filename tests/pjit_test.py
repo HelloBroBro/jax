@@ -3523,7 +3523,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     arr = jax.device_put(
         np.arange(16).reshape(8, 2), NamedSharding(mesh, P(None, 'x')))
 
-    with jtu.count_jit_and_pmap_compiles() as count:
+    with jtu.count_jit_and_pmap_lowerings() as count:
       vf = jax.vmap(pjit(lambda x: x * 2, in_shardings=ns))
       out = vf(arr)
       self.assertIsInstance(out.sharding, NamedSharding)
@@ -3867,7 +3867,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
       b = jax.device_put(out_a, NamedSharding(mesh2, P('x')))
       f(b)  # lowering cache *hit*
 
-    with jtu.count_jit_and_pmap_compiles() as count:
+    with jtu.count_jit_and_pmap_lowerings() as count:
       g(np.arange(8))
     self.assertEqual(count[0], 1)
 
@@ -3890,7 +3890,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
       b = jax.device_put(out_a, NamedSharding(mesh2, P()))
       f(b)  # lowering cache *miss*
 
-    with jtu.count_jit_and_pmap_compiles() as count:
+    with jtu.count_jit_and_pmap_lowerings() as count:
       g(np.arange(8))
     self.assertEqual(count[0], 2)
 
@@ -4398,7 +4398,7 @@ class PJitErrorTest(jtu.JaxTestCase):
     spec = P(resources,)
     with self.assertRaisesRegex(
         ValueError,
-        r"Resource axis: x of.*" + spec_regex(spec) + " is undefined"):
+        r"Resource axis: x of.*" + spec_regex(spec) + r" is not found in mesh: \(.*\)."):
       pjit(lambda x: x, in_shardings=spec, out_shardings=None)(x)
 
   @check_1d_2d_mesh(set_mesh=False)
@@ -4408,7 +4408,7 @@ class PJitErrorTest(jtu.JaxTestCase):
     spec = P(resources,)
     with self.assertRaisesRegex(
         ValueError,
-        r"Resource axis: x of.*" + spec_regex(spec) + " is undefined"):
+        r"Resource axis: x of.*" + spec_regex(spec) + r" is not found in mesh: \(.*\)."):
       pjit(lambda x: x, in_shardings=None, out_shardings=spec)(x)
 
   @check_1d_2d_mesh(set_mesh=False)
@@ -4418,7 +4418,7 @@ class PJitErrorTest(jtu.JaxTestCase):
     spec = P(resources,)
     with self.assertRaisesRegex(
         ValueError,
-        r"Resource axis: x of.*" + spec_regex(spec) + " is undefined"):
+        r"Resource axis: x of.*" + spec_regex(spec) + r" is not found in mesh: \(.*\)."):
       pjit(
           lambda x: with_sharding_constraint(x, spec),
           in_shardings=None,
