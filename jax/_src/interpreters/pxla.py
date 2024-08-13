@@ -1881,7 +1881,7 @@ def _cached_lowering_to_hlo(closed_jaxpr, api_name, fun_name, backend,
                             propagated_out_mem_kinds: tuple[None | str, ...],
                             platforms: tuple[str, ...],
                             lowering_parameters: mlir.LoweringParameters,
-                            mesh_shape_tuple: tuple[tuple[str, int], ...]):
+                            mesh_shape_tuple: tuple[tuple[str, int], ...] | None):
   jaxpr = closed_jaxpr.jaxpr
   in_shardings = semantic_in_shardings.shardings
   out_shardings = semantic_out_shardings.shardings
@@ -1911,7 +1911,8 @@ def _cached_lowering_to_hlo(closed_jaxpr, api_name, fun_name, backend,
     in_mlir_shardings = map(_to_logical_sharding, global_in_avals, in_shardings)
     out_mlir_shardings = map(_to_logical_sharding, global_out_avals, out_shardings)
     replicated_args = [False] * len(global_in_avals)
-    axis_ctx = sharding_impls.ShardingContext(num_devices, device_assignment)
+    axis_ctx = sharding_impls.ShardingContext(num_devices, device_assignment,
+                                              mesh_shape_tuple)
     num_partitions = num_devices
   else:
     # This path is triggered for `jit(pmap)` cases.
@@ -1957,8 +1958,7 @@ def _cached_lowering_to_hlo(closed_jaxpr, api_name, fun_name, backend,
         all_default_mem_kind=all_default_mem_kind,
         input_output_aliases=inout_aliases,
         propagated_out_mem_kinds=propagated_out_mem_kinds,
-        lowering_parameters=lowering_parameters,
-        mesh_shape_tuple=mesh_shape_tuple)
+        lowering_parameters=lowering_parameters)
   tuple_args = dispatch.should_tuple_args(len(global_in_avals), backend.platform)
   unordered_effects = list(
       effects.ordered_effects.filter_not_in(closed_jaxpr.effects))
@@ -2189,28 +2189,32 @@ def lower_sharding_computation(
                [js for js, _ in unique_intermediate_shardings],
                transfer_mem_kind_in_jaxpr))  # pytype: disable=wrong-arg-types
 
-  # TODO(yashkatariya): Remove this when XLA can propagate memory kinds or when
-  # JAX puts memory kinds in the types of jaxpr.
-  if not all_default_mem_kind:
+  if all_default_mem_kind:
+    propagated_out_mem_kinds = (None,) * len(global_out_avals)
+  else:
     propagated_out_mem_kinds = get_out_memory_kinds_via_propagation(
         closed_jaxpr, in_shardings)
-  else:
-    propagated_out_mem_kinds = (None,) * len(global_out_avals)
 
   # 2. Build up the HLO
   semantic_in_shardings = SemanticallyEqualShardings(
       in_shardings, global_in_avals)  # type: ignore
   semantic_out_shardings = SemanticallyEqualShardings(
       out_shardings, global_out_avals)  # type: ignore
+
   prim_requires_devices = dispatch.jaxpr_has_prim_requiring_devices(jaxpr)
+
   mesh_shape_tuple = None
-  if config.use_shardy_partitioner.value:
-    for sharding in it.chain(
-        in_shardings, out_shardings,
-        [js for js, _ in unique_intermediate_shardings]):
+  if config.use_shardy_partitioner.value or prim_requires_devices:
+    for sharding in it.chain(in_shardings, out_shardings,
+                             [js for js, _ in unique_intermediate_shardings]):
       if isinstance(sharding, sharding_impls.NamedSharding):
+        if (mesh_shape_tuple is not None and
+            mesh_shape_tuple != sharding.mesh.shape_tuple):
+          raise ValueError(
+              "mesh should be the same across the entire program. Got mesh"
+              f" shape for one sharding {mesh_shape_tuple} and"
+              f" {sharding.mesh.shape_tuple} for another")
         mesh_shape_tuple = sharding.mesh.shape_tuple
-        break
 
   (module, keepalive, host_callbacks, unordered_effects, ordered_effects,
    nreps, tuple_args, shape_poly_state) = _cached_lowering_to_hlo(
@@ -2252,6 +2256,8 @@ def lower_sharding_computation(
       out_layouts=out_layouts,
       pmap_nreps=nreps,
       shape_poly_state=shape_poly_state,
+      # TODO(yashkatariya): Remove `all_default_mem_kind` after
+      # MemoryDescription works in OSS.
       all_default_mem_kind=all_default_mem_kind,
       all_args_info=all_args_info,
       pgle_profiler=pgle_profiler,
@@ -2321,18 +2327,17 @@ def get_out_shardings_from_executable(
 ) -> Sequence[sharding_impls.GSPMDSharding] | None:
   from jax._src import pjit
 
-  if config.enable_memories.value:
-    if all_default_mem_kind:
-      omk = [None] * num_out_avals
-    else:
-      try:
-        omk = xla_executable.get_output_memory_kinds()[0]
-        if num_ordered_effects > 0:
-          omk = omk[num_ordered_effects:]
-      except:
-        omk = [None] * num_out_avals
-  else:
+  # TODO(yashkatariya): Remove `all_default_mem_kind` branch after
+  # MemoryDescription works in OSS.
+  if all_default_mem_kind:
     omk = [None] * num_out_avals
+  else:
+    try:
+      omk = xla_executable.get_output_memory_kinds()[0]
+      if num_ordered_effects > 0:
+        omk = omk[num_ordered_effects:]
+    except:
+      omk = [None] * num_out_avals
 
   assert len(omk) == num_out_avals, (len(omk), num_out_avals)
 

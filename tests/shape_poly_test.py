@@ -49,6 +49,7 @@ from jax._src.export import shape_poly_decision
 from jax._src.lax import lax as lax_internal
 from jax._src.lax import control_flow as lax_control_flow
 from jax._src.lib import xla_client
+from jax._src.lib import version as jaxlib_version
 import numpy as np
 
 config.parse_flags_with_absl()
@@ -2732,6 +2733,41 @@ _POLY_SHAPE_TEST_HARNESSES = [
       ]
     ],
     [
+        PolyHarness(
+            "lu_pivots_to_permutation",
+            f"shape={jtu.format_shape_dtype_string(shape, np.int32)}_poly={poly}_{permutation_size=}",
+            lax.linalg.lu_pivots_to_permutation,
+            arg_descriptors=[RandArg(shape, np.int32), StaticArg(permutation_size)],
+            polymorphic_shapes=[poly],
+            symbolic_constraints=constraints,
+        )
+        for shape, poly, permutation_size, constraints in [
+            ((4,), None, 8, ()),
+            ((2, 3, 4), "b1, b2, ...", 8, ()),
+            ((4,), "b", 8, ["b <= 8"]),
+            ((2, 3, 4), "b1, b2, b3", 8, ["b3 <= 8"]),
+        ]
+    ],
+    [
+        # Tracing errors are only thrown when the trailing dimension of pivots
+        # is static. Otherwise, the error is thrown at runtime.
+        PolyHarness(
+            "lu_pivots_to_permutation_error",
+            f"shape={jtu.format_shape_dtype_string(shape, np.int32)}_poly={poly}_{permutation_size=}",
+            lax.linalg.lu_pivots_to_permutation,
+            arg_descriptors=[RandArg(shape, np.int32), StaticArg(permutation_size)],
+            polymorphic_shapes=[poly],
+            symbolic_constraints=constraints,
+            expect_error=(ValueError, "Output permutation size"),
+        )
+        for shape, poly, permutation_size, constraints in [
+            ((4,), None, 3, ()),
+            ((2, 3, 4), "b1, b2, ...", 3, ()),
+            ((4,), "b", 8, ["b >= 9"]),
+            ((2, 3, 4), "b1, b2, b3", 8, ["b3 >= 9"]),
+        ]
+    ],
+    [
       # The random primitive tests, with threefry (both partitionable and
       # non-partitionable), and unsafe_rbg.
       [
@@ -3360,8 +3396,21 @@ class ShapePolyHarnessesTest(jtu.JaxTestCase):
         "vmap_qr:gpu", "qr:gpu",
         "vmap_svd:gpu",
     }
-    if f"{harness.group_name}:{jtu.device_under_test()}" in custom_call_harnesses:
+    name_device_key = f"{harness.group_name}:{jtu.device_under_test()}"
+    if name_device_key in custom_call_harnesses:
       raise unittest.SkipTest("native serialization with shape polymorphism not implemented for custom calls; b/261671778")
+
+    # This list keeps track of the minimum jaxlib version that supports shape
+    # polymorphism for some new primitives as we add them. This check is
+    # required so that we can still run the test suite with older versions of
+    # jaxlib.
+    version_gated = {
+        # TODO(danfm): remove these checks when jaxlib 0.4.32 is released.
+        "lu_pivots_to_permutation:gpu": (0, 4, 32),
+        "lu_pivots_to_permutation_error:gpu": (0, 4, 32),
+    }
+    if version_gated.get(name_device_key, jaxlib_version) > jaxlib_version:
+      raise unittest.SkipTest(f"shape polymorphism not supported by jaxlib version {jaxlib_version}")
 
     if harness.group_name == "schur" and not jtu.test_device_matches(["cpu"]):
       raise unittest.SkipTest("schur decomposition is only implemented on CPU.")
