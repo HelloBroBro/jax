@@ -15,9 +15,9 @@
 """Matmul kernels for H100."""
 
 import dataclasses
-import functools
-from typing import Any
+import itertools
 import math
+from typing import Any
 
 import jax
 from jax import random
@@ -87,13 +87,14 @@ class WGMMADefaultImpl:
       b_order: WGMMALayout,
       a_slice: SmemRef,
       b_slice: SmemRef,
+      swizzle: int,
   ) -> dict[str, WGMMAAccumulator]:
     """Perform a matrix multiplication.
 
     This function must guarantee that all WGMMA operations queued before it was
     called have completed before returning.
     """
-    acc = wgmma(acc, a_slice, b_slice, b_order=b_order)
+    acc = wgmma(acc, a_slice, b_slice, b_order=b_order, swizzle=swizzle)
     nvvm.wgmma_commit_group_sync_aligned()
     nvvm.wgmma_wait_group_sync_aligned(1)
     return acc
@@ -109,19 +110,18 @@ def mlir_context(f):
 @mlir_context
 def build_kernel(
     m, n, k,
-    lhs_dtype, rhs_dtype,
+    lhs_dtype, rhs_dtype, out_dtype,
     stages: int = 2,
     tile_m: int = 128,
     tile_n: int = 128,
-    cluster: tuple[int, int] = (1, 1),
+    swizzle: int = 128,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
     rhs_transpose: bool = False,
     wgmma_impl=WGMMADefaultImpl,
     profiler_spec: profiler.ProfilerSpec | None = None,
 ):
   f32 = ir.F32Type.get()
-  out_128b_elems = 128 // bytewidth(f32)
-  out_tiling = (64, out_128b_elems)
-  out_tile = jax.ShapeDtypeStruct(tile_shape((tile_m, tile_n), out_tiling), jnp.float32)
   if tile_m % 64 != 0:
     raise ValueError(f"{tile_m=} must be divisible by 64")
   if m % tile_m != 0:
@@ -130,24 +130,43 @@ def build_kernel(
     raise ValueError(f"n must be divisible by 64, but got {n=}")
   if stages < 2:
     raise ValueError(f"Need at least 2 stages, but got {stages=}")
+  if not rhs_transpose and jnp.dtype(rhs_dtype).itemsize != 2:
+    raise ValueError("Transpose only supported for only happen for 16bit types")
+  if swizzle not in {32, 64, 128}:
+    raise ValueError(f"swizzle must be 32, 64, or 128, but got {swizzle=}")
+
+  out_mlir_dtype = mlir.dtype_to_ir_type(out_dtype)
+  out_swizzle = swizzle
+  if bytewidth(out_mlir_dtype) == 4:
+    if tile_n % 32 == 0:
+      out_swizzle = 128
+    elif tile_n % 16 == 0:
+      out_swizzle = 64
+    else:
+      raise NotImplementedError(
+          f"{tile_n=} must by divisible by 16 for 32-bit output"
+      )
+  out_swizzle_elems = out_swizzle // bytewidth(out_mlir_dtype)
+  out_tiling = (64, out_swizzle_elems)
+  out_tile = jax.ShapeDtypeStruct(tile_shape((tile_m, tile_n), out_tiling), out_dtype)
 
   lhs_elem_bytes = bytewidth(mlir.dtype_to_ir_type(lhs_dtype))
   rhs_elem_bytes = bytewidth(mlir.dtype_to_ir_type(rhs_dtype))
-  lhs_128b_elems = 128 // lhs_elem_bytes
-  rhs_128b_elems = 128 // rhs_elem_bytes
-  tile_k = max(lhs_128b_elems, rhs_128b_elems)
+  lhs_swizzle_elems = swizzle // lhs_elem_bytes
+  rhs_swizzle_elems = swizzle // rhs_elem_bytes
+  tile_k = max(lhs_swizzle_elems, rhs_swizzle_elems)
 
-  if tile_n % rhs_128b_elems != 0:
+  if tile_n % rhs_swizzle_elems != 0:
     raise ValueError(
-        f"{tile_n=} must be divisible by 128 bytes ="
-        f" {((lhs_128b_elems, lhs_dtype), (rhs_128b_elems, rhs_dtype))}"
+        f"{tile_n=} must be divisible by {swizzle} bytes ="
+        f" {((lhs_swizzle_elems, lhs_dtype), (rhs_swizzle_elems, rhs_dtype))}"
     )
 
   if k % tile_k != 0:
     raise ValueError(f"k must be divisible by {tile_k=}, but got {k=}")
 
   block_tiling = Tiling(m=tile_m, n=tile_n, k=tile_k)
-  tma_tiling = Tiling(m=64, n=rhs_128b_elems, k=lhs_128b_elems)
+  tma_tiling = Tiling(m=64, n=rhs_swizzle_elems, k=lhs_swizzle_elems)
   k_steps = k // block_tiling.k
   stages = min(stages, k_steps)
 
@@ -184,7 +203,7 @@ def build_kernel(
       rhs_tma_tile_bytes = int(np.prod(block_tiling.kn) * rhs_elem_bytes)
       txcount = lhs_tma_tile_bytes + rhs_tma_tile_bytes
       common_copy_args = dict(
-          swizzle=128, barrier=barrier, arrive=False, uniform=False,
+          swizzle=swizzle, barrier=barrier, arrive=False, uniform=False,
       )
       with single_thread():
         barrier.arrive_expect_tx(txcount)
@@ -230,7 +249,9 @@ def build_kernel(
         rhs_smem_order = (
             WGMMALayout.COL_MAJOR if rhs_transpose else WGMMALayout.ROW_MAJOR
         )
-        accs = wgmma_impl.wgmma(impl_smem, accs, rhs_smem_order, a_slice, b_slice)
+        accs = wgmma_impl.wgmma(
+            impl_smem, accs, rhs_smem_order, a_slice, b_slice, swizzle=swizzle
+        )
 
       with ctx.named_region("TMA start"):
         tma_ki = arith.addi(ki, c(stages - 1))
@@ -256,7 +277,7 @@ def build_kernel(
 
     with ctx.named_region("SMEM store"):
       acc_val = wgmma_impl.get_result(stage_loop_body.result)
-      acc_val.store_tiled(epilogue_smem, swizzle=128)
+      acc_val.astype(out_mlir_dtype).store_tiled(epilogue_smem, swizzle=out_swizzle)
       commit_shared()  # Make sure the stores are visible to TMA.
 
     with ctx.named_region("GMEM store"):
@@ -265,7 +286,7 @@ def build_kernel(
           dst_ref=c_device,
           gmem_slice=(ds(m_start, tile_m), ds(n_start, tile_n)),
           gmem_transform=mosaic_gpu.TileTransform(out_tiling),
-          swizzle=128,
+          swizzle=out_swizzle,
       )
       ctx.await_async_copy(0)
 
@@ -277,17 +298,17 @@ def build_kernel(
           jax.ShapeDtypeStruct((m, k), lhs_dtype),
           jax.ShapeDtypeStruct((n, k) if rhs_transpose else (k, n), rhs_dtype),
       ),
-      jax.ShapeDtypeStruct((m, n), jnp.float32),
+      jax.ShapeDtypeStruct((m, n), out_dtype),
       (
           smem_shape,
           TMABarrier(num_barriers=stages),
           ClusterBarrier(
               collective_dims=(gpu.Dimension.x, gpu.Dimension.y),
               num_barriers=stages,
-          ) if math.prod(cluster) > 1 else None,
+          ) if cluster_m * cluster_n > 1 else None,
       ),
       profiler_spec,
-      cluster=(*cluster, 1),
+      cluster=(cluster_n, cluster_m, 1),
   )
 
 
@@ -300,33 +321,30 @@ def verify(
     tile_n=128,
     cluster_m=1,
     cluster_n=1,
+    swizzle=128,
     profile=False,
-    lhs_dtype=jnp.float16,
-    rhs_dtype=jnp.float16,
+    in_dtype=jnp.float16,
+    out_dtype=jnp.float32,
     rhs_transpose=False,
 ):
-  if not rhs_transpose and jnp.dtype(lhs_dtype).itemsize != 2:
-    raise ValueError(
-        "Implicit transpose can only happen for 16bit types (or mixed precision"
-        " that is underpinned by 16bit operations)."
-    )
+  lhs_dtype, rhs_dtype = in_dtype, in_dtype
 
   kx, ky = random.split(random.key(1234))
   x = random.uniform(kx, (m, k), dtype=lhs_dtype)
   y = random.uniform(ky, (n, k) if rhs_transpose else (k, n), dtype=rhs_dtype)
 
-  impl = WGMMADefaultImpl
-
   prof_spec = profiler.ProfilerSpec(4096) if profile else None
   f = build_kernel(
       m, n, k,
-      jnp.dtype(lhs_dtype), jnp.dtype(rhs_dtype),
+      jnp.dtype(lhs_dtype), jnp.dtype(rhs_dtype), jnp.dtype(out_dtype),
       stages=stages,
       tile_m=tile_m,
       tile_n=tile_n,
-      cluster=(cluster_m, cluster_n),
+      cluster_m=cluster_m,
+      cluster_n=cluster_n,
       rhs_transpose=rhs_transpose,
-      wgmma_impl=impl,
+      swizzle=swizzle,
+      wgmma_impl=WGMMADefaultImpl,
       profiler_spec=prof_spec,
   )
   z, runtime = profiler.measure(f, x, y)
@@ -342,21 +360,71 @@ def verify(
         for v in (x, y)
     )
 
-  ref_f = functools.partial(
-      jax.lax.dot_general,
-      dimension_numbers=dimension_numbers,
-      preferred_element_type=jnp.float32,
-  )
+  @jax.jit
+  def ref_f(x, y):
+    return jax.lax.dot_general(
+        x,
+        y,
+        dimension_numbers=dimension_numbers,
+        preferred_element_type=jnp.float32,
+    ).astype(out_dtype)
 
   ref, ref_runtime = profiler.measure(ref_f, x, y)
-  np.testing.assert_allclose(z, ref, atol=1e-3, rtol=1e-3)
+  np.testing.assert_allclose(
+      z.astype(jnp.float32), ref.astype(jnp.float32), atol=1e-3, rtol=1e-3
+  )
   return runtime, ref_runtime
 
 
 if __name__ == "__main__":
-  m, k, n = 4 * 33 * 128, 2048, 4 * 128
-  runtime, ref_runtime = verify(m=m, k=k, n=n, cluster_m=1, cluster_n=4)
+  dtype = jnp.dtype(jnp.float16)
+  m, k, n = 16384, 2048, 16384
+
+  kx, ky = random.split(random.key(1234))
+  x = random.uniform(kx, (m, k), dtype=dtype)
+  y = random.uniform(ky, (k, n), dtype=dtype)
+
+  tile_m = tile_n = (64, 128, 256)
+  cluster_m = cluster_n = (1, 2)
+  swizzle = (128,)
+  stages = (2, 4, 5, 6)
+  configs = itertools.product(tile_m, tile_n, cluster_m, cluster_n, stages, swizzle)
+  names = ("tile_m", "tile_n", "cluster_m", "cluster_n", "stages", "swizzle")
+  best_runtime = float("inf")
+  best_kwargs = {}
+  for config in configs:
+    kwargs = dict(zip(names, config))
+    if kwargs["cluster_m"] * kwargs["cluster_n"] > 8:
+      continue
+    if m < kwargs["tile_m"] or n < kwargs["tile_n"]:
+      continue
+    if (m // kwargs["tile_m"]) % kwargs["cluster_n"]:
+      continue
+    if (n // kwargs["tile_n"]) % kwargs["cluster_m"]:
+      continue
+    try:
+      f = build_kernel(
+          m, n, k, dtype, dtype, dtype, wgmma_impl=WGMMADefaultImpl, **kwargs
+      )
+      _, runtime = profiler.measure(f, x, y)
+    except ValueError as e:
+      if "Mosaic GPU kernel exceeds available shared memory" not in str(e):
+        raise
+      runtime = float("inf")
+    # Enable this to get more detailed information.
+    # else:
+    #   print(" ".join(f"{k}={v}" for k, v in kwargs.items()), int(runtime * 1000))
+    if runtime < best_runtime:
+      best_runtime = runtime
+      best_kwargs = kwargs
+  if not best_kwargs:
+    raise ValueError("No valid configuration found")
+
+  runtime, ref_runtime = verify(
+      m=m, k=k, n=n, in_dtype=dtype, out_dtype=dtype, **best_kwargs
+  )
   tflops = float(2 * k * m * n) / (runtime / 1e3) / 1e12
   ref_tflops = float(2 * k * m * n) / (ref_runtime / 1e3) / 1e12
+  print("Best parameters: ", " ".join(f"{k}={v}" for k, v in best_kwargs.items()))
   print(f"Kernel:    {runtime * 1000:.1f} us = {tflops:.1f} TFLOPS")
   print(f"Reference: {ref_runtime * 1000:.1f} us = {ref_tflops:.1f} TFLOPS")

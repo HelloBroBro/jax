@@ -609,6 +609,10 @@ def _export_lowered(
               f"disabled_checks={disabled_checks}")
     logging.info("Exported JAX function: %s\n", logmsg)
     logging.info(mlir.dump_module_message(mlir_module, "export"))
+    logging.info(
+        "Size of mlir_module_serialized: %d byte",
+        len(mlir_module_serialized),
+    )
 
   _check_module(mlir_module,
                 disabled_checks=disabled_checks)
@@ -920,6 +924,7 @@ def _check_lowering(lowering) -> None:
 
 _CPU_FFI_KERNELS = [
     "lapack_spotrf_ffi", "lapack_dpotrf_ffi", "lapack_cpotrf_ffi", "lapack_zpotrf_ffi",
+    "lapack_sgesdd_ffi", "lapack_dgesdd_ffi", "lapack_cgesdd_ffi", "lapack_zgesdd_ffi",
     "lapack_sgetrf_ffi", "lapack_dgetrf_ffi", "lapack_cgetrf_ffi", "lapack_zgetrf_ffi",
 ]
 # These are the JAX custom call target names that are guaranteed to be stable.
