@@ -1088,12 +1088,12 @@ def _load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree, **_):
   else:
     load_val = vector.LoadOp(
         aval_to_ir_type(load_aval, is_kernel_boundary=True), ref, starts).result
-  load_val = _maybe_cast_load_to_bool(aval_out, load_val)
-  if load_aval == aval_out:
-    return load_val
-  vec_type = ir.VectorType.get(aval_out.shape,
-                               _dtype_to_ir_type(aval_out.dtype))
-  return vector.ShapeCastOp(vec_type, load_val).result
+  if load_aval != aval_out:
+    vec_type = ir.VectorType.get(aval_out.shape,
+                                _dtype_to_ir_type(aval_out.dtype,
+                                                  is_kernel_boundary=True))
+    load_val = vector.ShapeCastOp(vec_type, load_val).result
+  return _maybe_cast_load_to_bool(aval_out, load_val)
 
 def _prng_key_load_lowering_rule(ctx: LoweringRuleContext, *args_flat, args_tree) -> KeyScalarBundle:
   """Lowering rule for loading PRNG keys from SMEM.
@@ -1148,15 +1148,20 @@ def _maybe_cast_load_to_bool(
   if out_aval.dtype != jnp.bool_:
     return val
   load_scalar_type = _dtype_to_ir_type(BOOL_MEMREF_TYPE)
-  if not out_aval.shape:
-    # For scalars, truncate the value to a bool.
-    pred = _cmpi_lowering_types[lax.ne_p]
-    predicate = ir.IntegerAttr.get(ir.IntegerType.get_signless(64), pred)
-    const_zero = ir.IntegerAttr.get(load_scalar_type, 0)
+  pred = _cmpi_lowering_types[lax.ne_p]
+  predicate = ir.IntegerAttr.get(ir.IntegerType.get_signless(64), pred)
+  const_zero = ir.IntegerAttr.get(load_scalar_type, 0)
+  if out_aval.shape:  # Vector case.
+    load_vector_type = aval_to_ir_type(out_aval, is_kernel_boundary=True)
+    vector_zeros = arith.ConstantOp(
+        load_vector_type,
+        ir.DenseElementsAttr.get_splat(load_vector_type, const_zero)
+    )
+    return arith.CmpIOp(predicate, val, vector_zeros).result
+  else:  # Scalar case.
     const_zero = arith.ConstantOp(load_scalar_type, const_zero)
     return arith.CmpIOp(predicate, val, const_zero).result
-  else:
-    raise NotImplementedError("Boolean vector loads are not supported.")
+
 
 def _maybe_cast_store_to_memref_type(
     expected_aval, val: ir.Value) -> ir.Value:
@@ -1295,9 +1300,7 @@ def reduce_lowering_rule(reduce_fn, type_to_kind, type_to_identity):
         kind,
         x,
         acc,
-        ir.ArrayAttr.get(
-            [ir.IntegerAttr.get(ir.IntegerType.get_signless(64), a) for a in axes]
-        ),
+        axes,
     )
     return op.result
   return _lowering_rule
@@ -1462,9 +1465,7 @@ def _dot_general_lowering_rule(
         ir.Attribute.parse("#vector.kind<add>"),
         arith.MulFOp(x, y),
         acc,
-        ir.ArrayAttr.get(
-            [ir.IntegerAttr.get(ir.IntegerType.get_signless(64), 1)]
-        ),
+        [1]
     )
     return vector.ShapeCastOp(out_type, red).result
 
@@ -2527,7 +2528,7 @@ lowering_rules[lax.bitcast_convert_type_p] = _bitcast_convert_type_lowering_rule
 
 def _alloc_value(aval: jax_core.AbstractValue) -> ir.Value:
   if isinstance(aval, pallas_core.AbstractMemoryRef):
-    memspace = ir.Attribute.parse(f"#tpu.memory_space<{aval.memory_space}>")
+    memspace = _memory_space_to_tpu_memspace(aval.memory_space)
     if jnp.issubdtype(aval.dtype, tpu_core.semaphore_dtype):
       assert aval.memory_space == TPUMemorySpace.SEMAPHORE
       memref_type = aval_to_ir_type(aval, memory_space=TPUMemorySpace.SEMAPHORE)
