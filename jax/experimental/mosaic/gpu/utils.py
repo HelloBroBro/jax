@@ -309,6 +309,8 @@ ds = DynamicSlice
 def memref_slice(ref: ir.Value, index) -> ir.Value:
   ref_ty = ir.MemRefType(ref.type)
   base_indices, slice_shape, is_squeezed = parse_indices(index, ref_ty.shape)
+  # TODO(apaszke): Check that slice is within the memref (indices might be
+  # dynamic, but we can at least catch some OOB slices).
 
   memref_strides, offset = ref_ty.get_strides_and_offset()
   new_offset = offset
@@ -712,8 +714,11 @@ class CollectiveBarrierRef:
         has_side_effects=True,
     )
 
-  def wait(self):
-    self.barrier.wait()
+  def wait(self, *args, **kwargs):
+    self.barrier.wait(*args, **kwargs)
+
+  def wait_parity(self, *args, **kwargs):
+    self.barrier.wait_parity(*args, **kwargs)
 
 
 class Partition:
