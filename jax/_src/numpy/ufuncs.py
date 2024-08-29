@@ -29,6 +29,7 @@ from jax._src import dtypes
 from jax._src.api import jit
 from jax._src.custom_derivatives import custom_jvp
 from jax._src.lax import lax
+from jax._src.lax import other as lax_other
 from jax._src.typing import Array, ArrayLike
 from jax._src.numpy.util import (
    check_arraylike, promote_args, promote_args_inexact,
@@ -52,9 +53,48 @@ def _replace_inf(x: ArrayLike) -> Array:
 def _to_bool(x: Array) -> Array:
   return x if x.dtype == bool else lax.ne(x, _lax_const(x, 0))
 
-@implements(np.fabs, module='numpy')
+
 @partial(jit, inline=True)
 def fabs(x: ArrayLike, /) -> Array:
+  """Compute the element-wise absolute values of the real-valued input.
+
+  JAX implementation of :func:`numpy.fabs`.
+
+  Args:
+    x: input array or scalar. Must not have a complex dtype.
+
+  Returns:
+    An array with same shape as ``x`` and dtype float, containing the element-wise
+    absolute values.
+
+  See also:
+    - :func:`jax.numpy.absolute`: Computes the absolute values of the input including
+      complex dtypes.
+    - :func:`jax.numpy.abs`: Computes the absolute values of the input including
+      complex dtypes.
+
+  Examples:
+    For integer inputs:
+
+    >>> x = jnp.array([-5, -9, 1, 10, 15])
+    >>> jnp.fabs(x)
+    Array([ 5.,  9.,  1., 10., 15.], dtype=float32)
+
+    For float type inputs:
+
+    >>> x1 = jnp.array([-1.342, 5.649, 3.927])
+    >>> jnp.fabs(x1)
+    Array([1.342, 5.649, 3.927], dtype=float32)
+
+    For boolean inputs:
+
+    >>> x2 = jnp.array([True, False])
+    >>> jnp.fabs(x2)
+    Array([1., 0.], dtype=float32)
+  """
+  check_arraylike('fabs', x)
+  if dtypes.issubdtype(dtypes.dtype(x), np.complexfloating):
+    raise TypeError("ufunc 'fabs' does not support complex dtypes")
   return lax.abs(*promote_args_inexact('fabs', x))
 
 @implements(getattr(np, 'bitwise_invert', np.invert), module='numpy')
@@ -87,17 +127,77 @@ def positive(x: ArrayLike, /) -> Array:
 def sign(x: ArrayLike, /) -> Array:
   return lax.sign(*promote_args('sign', x))
 
-@implements(np.floor, module='numpy')
+
 @partial(jit, inline=True)
 def floor(x: ArrayLike, /) -> Array:
+  """Round input to the nearest integer downwards.
+
+  JAX implementation of :func:`numpy.floor`.
+
+  Args:
+    x: input array or scalar. Must not have complex dtype.
+
+  Returns:
+    An array with same shape and dtype as ``x`` containing the values rounded to
+    the nearest integer that is less than or equal to the value itself.
+
+  See also:
+    - :func:`jax.numpy.fix`: Rounds the input to the nearest interger towards zero.
+    - :func:`jax.numpy.trunc`: Rounds the input to the nearest interger towards
+      zero.
+    - :func:`jax.numpy.ceil`: Rounds the input up to the nearest integer.
+
+  Examples:
+    >>> key = jax.random.key(42)
+    >>> x = jax.random.uniform(key, (3, 3), minval=-5, maxval=5)
+    >>> with jnp.printoptions(precision=2, suppress=True):
+    ...     print(x)
+    [[ 1.44 -1.77 -3.07]
+     [ 3.86  2.25 -3.08]
+     [-1.55 -2.48  1.32]]
+    >>> jnp.floor(x)
+    Array([[ 1., -2., -4.],
+           [ 3.,  2., -4.],
+           [-2., -3.,  1.]], dtype=float32)
+  """
   check_arraylike('floor', x)
   if dtypes.isdtype(dtypes.dtype(x), ('integral', 'bool')):
     return lax.asarray(x)
   return lax.floor(*promote_args_inexact('floor', x))
 
-@implements(np.ceil, module='numpy')
+
 @partial(jit, inline=True)
 def ceil(x: ArrayLike, /) -> Array:
+  """Round input to the nearest integer upwards.
+
+  JAX implementation of :func:`numpy.ceil`.
+
+  Args:
+    x: input array or scalar. Must not have complex dtype.
+
+  Returns:
+    An array with same shape and dtype as ``x`` containing the values rounded to
+    the nearest integer that is greater than or equal to the value itself.
+
+  See also:
+    - :func:`jax.numpy.fix`: Rounds the input to the nearest interger towards zero.
+    - :func:`jax.numpy.trunc`: Rounds the input to the nearest interger towards
+      zero.
+    - :func:`jax.numpy.floor`: Rounds the input down to the nearest integer.
+
+  Examples:
+    >>> key = jax.random.key(1)
+    >>> x = jax.random.uniform(key, (3, 3), minval=-5, maxval=5)
+    >>> with jnp.printoptions(precision=2, suppress=True):
+    ...     print(x)
+    [[ 2.55 -1.87 -3.76]
+     [ 0.48  3.85 -1.94]
+     [ 3.2   4.56 -1.43]]
+    >>> jnp.ceil(x)
+    Array([[ 3., -1., -3.],
+           [ 1.,  4., -1.],
+           [ 4.,  5., -1.]], dtype=float32)
+  """
   check_arraylike('ceil', x)
   if dtypes.isdtype(dtypes.dtype(x), ('integral', 'bool')):
     return lax.asarray(x)
@@ -758,21 +858,30 @@ def _pow_int_int(x1, x2):
   return acc
 
 
-@custom_jvp
-@implements(np.logaddexp, module='numpy')
 @jit
 def logaddexp(x1: ArrayLike, x2: ArrayLike, /) -> Array:
+  """Compute ``log(exp(x1) + exp(x2))`` avoiding overflow.
+
+  JAX implementation of :func:`numpy.logaddexp`
+
+  Args:
+    x1: input array
+    x2: input array
+
+  Returns:
+    array containing the result.
+
+  Examples:
+
+  >>> x1 = jnp.array([1, 2, 3])
+  >>> x2 = jnp.array([4, 5, 6])
+  >>> result1 = jnp.logaddexp(x1, x2)
+  >>> result2 = jnp.log(jnp.exp(x1) + jnp.exp(x2))
+  >>> print(jnp.allclose(result1, result2))
+  True
+  """
   x1, x2 = promote_args_inexact("logaddexp", x1, x2)
-  amax = lax.max(x1, x2)
-  if dtypes.issubdtype(x1.dtype, np.floating):
-    delta = lax.sub(x1, x2)
-    return lax.select(lax._isnan(delta),
-                      lax.add(x1, x2),  # NaNs or infinities of the same sign.
-                      lax.add(amax, lax.log1p(lax.exp(lax.neg(lax.abs(delta))))))
-  else:
-    delta = lax.sub(lax.add(x1, x2), lax.mul(amax, _constant_like(amax, 2)))
-    out = lax.add(amax, lax.log1p(lax.exp(delta)))
-    return lax.complex(lax.real(out), _wrap_between(lax.imag(out), np.pi))
+  return lax_other.logaddexp(x1, x2)
 
 
 def _wrap_between(x, _a):
@@ -783,17 +892,6 @@ def _wrap_between(x, _a):
   rem = lax.rem(lax.add(x, a), two_a)
   rem = lax.select(lax.lt(rem, zero), lax.add(rem, two_a), rem)
   return lax.sub(rem, a)
-
-
-@logaddexp.defjvp
-def _logaddexp_jvp(primals, tangents):
-  x1, x2 = primals
-  t1, t2 = tangents
-  x1, x2, t1, t2 = promote_args_inexact("logaddexp_jvp", x1, x2, t1, t2)
-  primal_out = logaddexp(x1, x2)
-  tangent_out = lax.add(lax.mul(t1, exp(lax.sub(_replace_inf(x1), _replace_inf(primal_out)))),
-                        lax.mul(t2, exp(lax.sub(_replace_inf(x2), _replace_inf(primal_out)))))
-  return primal_out, tangent_out
 
 
 @custom_jvp

@@ -923,22 +923,12 @@ def _check_lowering(lowering) -> None:
         "\n".join(not_implemented_msgs))
 
 _CPU_FFI_KERNELS = [
-    "lapack_spotrf_ffi",
-    "lapack_dpotrf_ffi",
-    "lapack_cpotrf_ffi",
-    "lapack_zpotrf_ffi",
-    "lapack_sgeqrf_ffi",
-    "lapack_dgeqrf_ffi",
-    "lapack_cgeqrf_ffi",
-    "lapack_zgeqrf_ffi",
-    "lapack_sgesdd_ffi",
-    "lapack_dgesdd_ffi",
-    "lapack_cgesdd_ffi",
-    "lapack_zgesdd_ffi",
-    "lapack_sgetrf_ffi",
-    "lapack_dgetrf_ffi",
-    "lapack_cgetrf_ffi",
-    "lapack_zgetrf_ffi",
+    "lapack_spotrf_ffi", "lapack_dpotrf_ffi", "lapack_cpotrf_ffi", "lapack_zpotrf_ffi",
+    "lapack_sgeqrf_ffi", "lapack_dgeqrf_ffi", "lapack_cgeqrf_ffi", "lapack_zgeqrf_ffi",
+    "lapack_ssyevd_ffi", "lapack_dsyevd_ffi", "lapack_cheevd_ffi", "lapack_zheevd_ffi",
+    "lapack_sgeev_ffi", "lapack_dgeev_ffi", "lapack_cgeev_ffi", "lapack_zgeev_ffi",
+    "lapack_sgesdd_ffi", "lapack_dgesdd_ffi", "lapack_cgesdd_ffi", "lapack_zgesdd_ffi",
+    "lapack_sgetrf_ffi", "lapack_dgetrf_ffi", "lapack_cgetrf_ffi", "lapack_zgetrf_ffi",
 ]
 # These are the JAX custom call target names that are guaranteed to be stable.
 # Their backwards compatibility is tested by back_compat_test.py.

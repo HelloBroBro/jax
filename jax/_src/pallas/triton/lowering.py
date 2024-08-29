@@ -404,6 +404,21 @@ def lower_jaxpr_to_triton_ir(
   return map(read_env, jaxpr.outvars)
 
 
+def lower_fun(
+    fun: Callable[..., Any], *, multiple_results: bool
+) -> Callable[..., Any]:
+  fn = fun if multiple_results else lambda *args, **kw: (fun(*args, **kw),)
+
+  def f_lowered(ctx: LoweringRuleContext, *args, **params):
+    wrapped_fun = lu.wrap_init(fn, params)
+    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
+    jaxpr = jax_core.ClosedJaxpr(jaxpr, consts)
+    out = _closed_call_lowering_rule(ctx, *args, call_jaxpr=jaxpr)
+    return out if multiple_results else out[0]
+
+  return f_lowered
+
+
 # # Primitive lowering rules
 # ## Programming model primitives
 
@@ -564,7 +579,7 @@ class _Extern:
     if len(avals) != len(self.arg_types):
       return False
     return all(
-        aval.weak_type or aval.dtype.name == arg_type
+        aval.dtype.name == arg_type
         for aval, arg_type in zip(avals, self.arg_types)
     )
 
@@ -978,6 +993,27 @@ triton_lowering_rules.update({
             _Extern(["float64", "float64"], "__ocml_nextafter_f64", "float64"),
         ],
     ),
+    lax.erf_inv_p: _make_dispatch_table(
+        "erf_inv",
+        cuda=[
+            _Fallback(
+                ["float32"],
+                lower_fun(
+                    pallas_utils.erf_inv_32_lowering_helper,
+                    multiple_results=False,
+                ),
+            ),
+        ],
+        rocm=[
+            _Fallback(
+                ["float32"],
+                lower_fun(
+                    pallas_utils.erf_inv_32_lowering_helper,
+                    multiple_results=False,
+                ),
+            ),
+        ],
+    ),
 })
 
 
@@ -990,21 +1026,19 @@ def _minus(x: ir.Value) -> ir.Value:
 def _add(x: ir.Value, y: ir.Value):
   x_element_type = _element_type(x.type)
   y_element_type = _element_type(y.type)
-  if tt_dialect.PointerType.isinstance(y_element_type):
-    assert not tt_dialect.PointerType.isinstance(x_element_type)
-    x, y = y, x
-    x_element_type, y_element_type = y_element_type, x_element_type
 
   if tt_dialect.PointerType.isinstance(x_element_type):
+    assert not tt_dialect.PointerType.isinstance(y_element_type)
     return tt_dialect.addptr(x.type, x, y)
+  if tt_dialect.PointerType.isinstance(y_element_type):
+    return tt_dialect.addptr(y.type, y, x)
 
   assert x.type == y.type, (str(x.type), str(y.type))
   if isinstance(x_element_type, ir.IntegerType):
     return arith_dialect.addi(x, y)
-  elif isinstance(x_element_type, ir.FloatType):
+  if isinstance(x_element_type, ir.FloatType):
     return arith_dialect.addf(x, y)
-  else:
-    raise NotImplementedError(f"unsupported dtypes: {x.type} and {y.type}")
+  raise NotImplementedError(f"unsupported dtypes: {x.type} and {y.type}")
 
 
 def _sub(x: ir.Value, y: ir.Value) -> ir.Value:
@@ -1255,21 +1289,6 @@ def _integer_pow_rule(ctx: LoweringRuleContext, x, *, y: int):
     return  _truediv(_full(acc.type, 1), acc, signed=signed)
   else:
     return acc
-
-
-def lower_fun(
-    fun: Callable[..., Any], *, multiple_results: bool
-) -> Callable[..., Any]:
-  fn = fun if multiple_results else lambda *args, **kw: (fun(*args, **kw),)
-
-  def f_lowered(ctx: LoweringRuleContext, *args, **params):
-    wrapped_fun = lu.wrap_init(fn, params)
-    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
-    jaxpr = jax_core.ClosedJaxpr(jaxpr, consts)
-    out = _closed_call_lowering_rule(ctx, *args, call_jaxpr=jaxpr)
-    return out if multiple_results else out[0]
-
-  return f_lowered
 
 
 _JAX_FN_MAPPING = {
