@@ -1277,8 +1277,10 @@ def pallas_call(
       If missing, then we use `{kernel_name} at {file}:{line}`.
     compiler_params: Optional compiler parameters. If a dict is provided, it
       should be of the form {platform: {param_name: param_value}}, where
-      platform is either 'mosaic' or 'triton'. For TPUs, it is also possible
-      to pass in a pallas.tpu.TPUCompilerParams struct.
+      platform is either 'mosaic' or 'triton'. It is also possible
+      to pass in `jax.experimental.pallas.tpu.TPUCompilerParams` for TPUs and
+      `jax.experimental.pallas.gpu.TritonCompilerParams` for Triton/GPUs.
+
 
   Returns:
     A function that can be called on a number of positional array arguments to
@@ -1291,7 +1293,7 @@ def pallas_call(
   if compiler_params is None:
     compiler_params = {}
   if isinstance(compiler_params, pallas_core.CompilerParams):
-    if compiler_params.PLATFORM not in ["mosaic", "triton"]:
+    if compiler_params.PLATFORM not in ["mosaic", "mosaic_gpu", "triton"]:
       raise ValueError(
           f"Unknown platform in compiler params: {compiler_params.PLATFORM}")
     compiler_params = {
