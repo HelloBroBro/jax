@@ -17,7 +17,7 @@
 from collections.abc import Sequence
 import dataclasses
 import enum
-from typing import ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 from jax import core as jax_core
 from jax._src import core
 from jax._src import tree_util
@@ -29,11 +29,13 @@ import jax.numpy as jnp
 AbstractMemoryRef = pallas_core.AbstractMemoryRef
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class GPUCompilerParams(pallas_core.CompilerParams):
   """Mosaic GPU compiler parameters.
 
   Attributes:
+    approx_math: If True, the compiler is allowed to use approximate
+      implementations of some math operations, e.g. ``exp``. Defaults to False.
     dimension_semantics: A list of dimension semantics for each grid
       dimension of the kernel. Either "parallel" for dimensions that can
       execute in any order, or "sequential" for dimensions that must be
@@ -42,6 +44,7 @@ class GPUCompilerParams(pallas_core.CompilerParams):
       meaning no pipelining is done.
   """
   PLATFORM: ClassVar[str] = "mosaic_gpu"
+  approx_math: bool = False
   dimension_semantics: Sequence[Literal["parallel", "sequential"]] | None = None
   num_stages: int = 1
 
@@ -56,7 +59,7 @@ class GPUMemorySpace(enum.Enum):
 
   def __call__(self, shape: tuple[int, ...], dtype: jnp.dtype):
     # A convenience function for constructing MemoryRef types.
-    return MemoryRef(shape, dtype, self)
+    return MemoryRef(shape, dtype, memory_space=self)
 
 
 class MemoryRefTransform(pallas_core.MemoryRefTransform, Protocol):
@@ -146,6 +149,26 @@ class GPUBlockSpec(pallas_core.BlockSpec):
     )
 
 
+@dataclasses.dataclass(init=False, kw_only=True)
+class GPUGridSpec(pallas_core.GridSpec):
+  scratch_shapes: Sequence[Any]
+
+  def __init__(
+      self,
+      grid: pallas_core.Grid = (),
+      in_specs: pallas_core.BlockSpecTree = pallas_core.no_block_spec,
+      out_specs: pallas_core.BlockSpecTree = pallas_core.no_block_spec,
+      scratch_shapes: Sequence[Any] = ()
+  ):
+    super().__init__(grid, in_specs, out_specs)
+    self.scratch_shapes = tuple(scratch_shapes)
+
+  def _make_scratch_aval(self, obj: object) -> core.AbstractValue:
+    if isinstance(obj, MemoryRef):
+      return obj.get_aval()
+    raise TypeError(f"Cannot convert {obj} to an abstract value")
+
+
 # TODO(b/354568887): Cosolidate this with TPU's MemoryRef.
 @dataclasses.dataclass(frozen=True)
 class MemoryRef:
@@ -153,7 +176,7 @@ class MemoryRef:
 
   shape: tuple[int, ...]
   dtype: jnp.dtype
-  memory_space: GPUMemorySpace
+  memory_space: GPUMemorySpace = dataclasses.field(kw_only=True)
 
   def get_aval(self) -> AbstractMemoryRef:
     return AbstractMemoryRef(
