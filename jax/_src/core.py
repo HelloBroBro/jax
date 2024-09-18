@@ -283,9 +283,9 @@ class JaxprEqnContext:
 
   def __repr__(self):
     return (
-        f"JaxprEqnContext(compute_type={self.compute_type},"
-        f"threefry_partitionable={self.threefry_partitionable}),"
-        f"xla_metadata={self.xla_metadata}"
+        f"JaxprEqnContext(compute_type={self.compute_type}, "
+        f"threefry_partitionable={self.threefry_partitionable}, "
+        f"xla_metadata={self.xla_metadata})"
     )
 
 
@@ -343,8 +343,7 @@ def new_jaxpr_eqn(invars, outvars, primitive, params, effects, source_info=None,
   ctx = ctx or JaxprEqnContext(
       compute_on.current_compute_type(),
       config.threefry_partitionable.value,
-      xla_metadata_lib.current_xla_metadata(),
-  )
+      xla_metadata_lib.current_xla_metadata())
   if config.enable_checks.value:
     assert all(isinstance(x, (Var, Literal)) for x in  invars)
     assert all(isinstance(v,  Var)           for v in outvars)

@@ -8519,9 +8519,41 @@ def argwhere(
   return result.reshape(result.shape[0], ndim(a))
 
 
-@util.implements(np.argmax, skip_params=['out'])
 def argmax(a: ArrayLike, axis: int | None = None, out: None = None,
            keepdims: bool | None = None) -> Array:
+  """Return the index of the maximum value of an array.
+
+  JAX implementation of :func:`numpy.argmax`.
+
+  Args:
+    a: input array
+    axis: optional integer specifying the axis along which to find the maximum
+      value. If ``axis`` is not specified, ``a`` will be flattened.
+    out: unused by JAX
+    keepdims: if True, then return an array with the same number of dimensions
+      as ``a``.
+
+  Returns:
+    an array containing the index of the maximum value along the specified axis.
+
+  See also:
+    - :func:`jax.numpy.argmin`: return the index of the minimum value.
+    - :func:`jax.numpy.nanargmax`: compute ``argmax`` while ignoring NaN values.
+
+  Examples:
+    >>> x = jnp.array([1, 3, 5, 4, 2])
+    >>> jnp.argmax(x)
+    Array(2, dtype=int32)
+
+    >>> x = jnp.array([[1, 3, 2],
+    ...                [5, 4, 1]])
+    >>> jnp.argmax(x, axis=1)
+    Array([1, 0], dtype=int32)
+
+    >>> jnp.argmax(x, axis=1, keepdims=True)
+    Array([[1],
+           [0]], dtype=int32)
+  """
   util.check_arraylike("argmax", a)
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.argmax is not supported.")
@@ -8541,9 +8573,42 @@ def _argmax(a: Array, axis: int | None = None, keepdims: bool = False) -> Array:
   result = lax.argmax(a, _canonicalize_axis(axis, a.ndim), dtypes.canonicalize_dtype(int_))
   return expand_dims(result, dims) if keepdims else result
 
-@util.implements(np.argmin, skip_params=['out'])
+
 def argmin(a: ArrayLike, axis: int | None = None, out: None = None,
            keepdims: bool | None = None) -> Array:
+  """Return the index of the minimum value of an array.
+
+  JAX implementation of :func:`numpy.argmax`.
+
+  Args:
+    a: input array
+    axis: optional integer specifying the axis along which to find the maximum
+      value. If ``axis`` is not specified, ``a`` will be flattened.
+    out: unused by JAX
+    keepdims: if True, then return an array with the same number of dimensions
+      as ``a``.
+
+  Returns:
+    an array containing the index of the maximum value along the specified axis.
+
+  See also:
+    - :func:`jax.numpy.argmax`: return the index of the maximum value.
+    - :func:`jax.numpy.nanargmin`: compute ``argmin`` while ignoring NaN values.
+
+  Examples:
+    >>> x = jnp.array([1, 3, 5, 4, 2])
+    >>> jnp.argmin(x)
+    Array(0, dtype=int32)
+
+    >>> x = jnp.array([[1, 3, 2],
+    ...                [5, 4, 1]])
+    >>> jnp.argmin(x, axis=1)
+    Array([0, 2], dtype=int32)
+
+    >>> jnp.argmin(x, axis=1, keepdims=True)
+    Array([[0],
+           [2]], dtype=int32)
+  """
   util.check_arraylike("argmin", a)
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.argmin is not supported.")
@@ -8564,19 +8629,57 @@ def _argmin(a: Array, axis: int | None = None, keepdims: bool = False) -> Array:
   return expand_dims(result, dims) if keepdims else result
 
 
-_NANARG_DOC = """\
-Warning: jax.numpy.arg{} returns -1 for all-NaN slices and does not raise
-an error.
-"""
-
-
-@util.implements(np.nanargmax, lax_description=_NANARG_DOC.format("max"), skip_params=['out'])
 def nanargmax(
     a: ArrayLike,
     axis: int | None = None,
     out: None = None,
     keepdims: bool | None = None,
 ) -> Array:
+  """Return the index of the maximum value of an array, ignoring NaNs.
+
+  JAX implementation of :func:`numpy.nanargmax`.
+
+  Args:
+    a: input array
+    axis: optional integer specifying the axis along which to find the maximum
+      value. If ``axis`` is not specified, ``a`` will be flattened.
+    out: unused by JAX
+    keepdims: if True, then return an array with the same number of dimensions
+      as ``a``.
+
+  Returns:
+    an array containing the index of the maximum value along the specified axis.
+
+  Note:
+    In the case of an axis with all-NaN values, the returned index will be -1.
+    This differs from the behavior of :func:`numpy.nanargmax`, which raises an error.
+
+  See also:
+    - :func:`jax.numpy.argmax`: return the index of the maximum value.
+    - :func:`jax.numpy.nanargmin`: compute ``argmin`` while ignoring NaN values.
+
+  Examples:
+    >>> x = jnp.array([1, 3, 5, 4, jnp.nan])
+
+    Using a standard :func:`~jax.numpy.argmax` leads to potentially unexpected results:
+
+    >>> jnp.argmax(x)
+    Array(4, dtype=int32)
+
+    Using ``nanargmax`` returns the index of the maximum non-NaN value.
+
+    >>> jnp.nanargmax(x)
+    Array(2, dtype=int32)
+
+    >>> x = jnp.array([[1, 3, jnp.nan],
+    ...                [5, 4, jnp.nan]])
+    >>> jnp.nanargmax(x, axis=1)
+    Array([1, 0], dtype=int32)
+
+    >>> jnp.nanargmax(x, axis=1, keepdims=True)
+    Array([[1],
+           [0]], dtype=int32)
+  """
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.nanargmax is not supported.")
   return _nanargmax(a, None if axis is None else operator.index(axis), keepdims=bool(keepdims))
@@ -8593,13 +8696,50 @@ def _nanargmax(a, axis: int | None = None, keepdims: bool = False):
   return where(reductions.all(nan_mask, axis=axis, keepdims=keepdims), -1, res)
 
 
-@util.implements(np.nanargmin, lax_description=_NANARG_DOC.format("min"),  skip_params=['out'])
 def nanargmin(
     a: ArrayLike,
     axis: int | None = None,
     out: None = None,
     keepdims: bool | None = None,
 ) -> Array:
+
+  """Return the index of the minimum value of an array, ignoring NaNs.
+
+  JAX implementation of :func:`numpy.nanargmin`.
+
+  Args:
+    a: input array
+    axis: optional integer specifying the axis along which to find the maximum
+      value. If ``axis`` is not specified, ``a`` will be flattened.
+    out: unused by JAX
+    keepdims: if True, then return an array with the same number of dimensions
+      as ``a``.
+
+  Returns:
+    an array containing the index of the minimum value along the specified axis.
+
+  Note:
+    In the case of an axis with all-NaN values, the returned index will be -1.
+    This differs from the behavior of :func:`numpy.nanargmin`, which raises an error.
+
+  See also:
+    - :func:`jax.numpy.argmin`: return the index of the minimum value.
+    - :func:`jax.numpy.nanargmax`: compute ``argmax`` while ignoring NaN values.
+
+  Examples:
+    >>> x = jnp.array([jnp.nan, 3, 5, 4, 2])
+    >>> jnp.nanargmin(x)
+    Array(4, dtype=int32)
+
+    >>> x = jnp.array([[1, 3, jnp.nan],
+    ...                [5, 4, jnp.nan]])
+    >>> jnp.nanargmin(x, axis=1)
+    Array([0, 1], dtype=int32)
+
+    >>> jnp.nanargmin(x, axis=1, keepdims=True)
+    Array([[0],
+           [1]], dtype=int32)
+  """
   if out is not None:
     raise NotImplementedError("The 'out' argument to jnp.nanargmin is not supported.")
   return _nanargmin(a, None if axis is None else operator.index(axis), keepdims=bool(keepdims))
@@ -8679,9 +8819,29 @@ def sort(
   return lax.rev(result, dimensions=[dimension]) if descending else result
 
 
-@util.implements(np.sort_complex)
 @jit
 def sort_complex(a: ArrayLike) -> Array:
+  """Return a sorted copy of complex array.
+
+  JAX implementation of :func:`numpy.sort_complex`.
+
+  Complex numbers are sorted lexicographically, meaning by their real part
+  first, and then by their imaginary part if real parts are equal.
+
+  Args:
+    a: input array. If dtype is not complex, the array will be upcast to complex.
+
+  Returns:
+    A sorted array of the same shape and complex dtype as the input.
+
+  See also:
+    - :func:`jax.numpy.sort`: Return a sorted copy of an array.
+
+  Examples:
+    >>> a = jnp.array([1+2j, 2+4j, 3-1j, 2+3j])
+    >>> jnp.sort_complex(a)
+    Array([1.+2.j, 2.+3.j, 2.+4.j, 3.-1.j], dtype=complex64)
+  """
   util.check_arraylike("sort_complex", a)
   a = lax.sort(asarray(a), dimension=0)
   return lax.convert_element_type(a, dtypes.to_complex_dtype(a.dtype))
@@ -10526,7 +10686,7 @@ def _searchsorted_via_scan(unrolled: bool, sorted_arr: Array, query: Array, side
 def _searchsorted_via_sort(sorted_arr: Array, query: Array, side: str, dtype: type) -> Array:
   working_dtype = int32 if sorted_arr.size + query.size < np.iinfo(np.int32).max else int64
   def _rank(x):
-    idx = lax.iota(working_dtype, len(x))
+    idx = lax.iota(working_dtype, x.shape[0])
     return zeros_like(idx).at[argsort(x)].set(idx)
   query_flat = query.ravel()
   if side == 'left':
@@ -10619,8 +10779,8 @@ def searchsorted(a: ArrayLike, v: ArrayLike, side: str = 'left',
   a, v = util.promote_dtypes(a, v)
   if sorter is not None:
     a = a[sorter]
-  dtype = int32 if len(a) <= np.iinfo(np.int32).max else int64
-  if len(a) == 0:
+  dtype = int32 if a.shape[0] <= np.iinfo(np.int32).max else int64
+  if a.shape[0] == 0:
     return zeros_like(v, dtype=dtype)
   impl = {
       'scan': partial(_searchsorted_via_scan, False),
@@ -10630,9 +10790,11 @@ def searchsorted(a: ArrayLike, v: ArrayLike, side: str = 'left',
   }[method]
   return impl(asarray(a), asarray(v), side, dtype)  # type: ignore
 
-@util.implements(np.digitize)
-@partial(jit, static_argnames=('right',))
-def digitize(x: ArrayLike, bins: ArrayLike, right: bool = False) -> Array:
+@util.implements(np.digitize, lax_description=_dedent("""
+    Optionally, the ``method`` argument can be used to configure the
+    underlying :func:`jax.numpy.searchsorted` algorithm."""))
+@partial(jit, static_argnames=('right', 'method'))
+def digitize(x: ArrayLike, bins: ArrayLike, right: bool = False, *, method: str = 'scan') -> Array:
   util.check_arraylike("digitize", x, bins)
   right = core.concrete_or_error(bool, right, "right argument of jnp.digitize()")
   bins_arr = asarray(bins)
@@ -10643,8 +10805,8 @@ def digitize(x: ArrayLike, bins: ArrayLike, right: bool = False) -> Array:
   side = 'right' if not right else 'left'
   return where(
     bins_arr[-1] >= bins_arr[0],
-    searchsorted(bins_arr, x, side=side),
-    len(bins_arr) - searchsorted(bins_arr[::-1], x, side=side)
+    searchsorted(bins_arr, x, side=side, method=method),
+    bins_arr.shape[0] - searchsorted(bins_arr[::-1], x, side=side, method=method)
   )
 
 
