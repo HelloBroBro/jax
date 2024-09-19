@@ -714,7 +714,7 @@ debug_print_p.multiple_results = True
 
 
 def debug_print(fmt: str, *args: jax.typing.ArrayLike):
-  """Prints scalar values from inside a Pallas kernel.
+  """Prints values from inside a Pallas kernel.
 
   Args:
     fmt: A format string to be included in the output. The restrictions on the
@@ -724,11 +724,11 @@ def debug_print(fmt: str, *args: jax.typing.ArrayLike):
         (``{...}``), since it is always printed before any of the values.
       * On GPU, when using the experimental Mosaic GPU backend, ``fmt`` must
         contain a placeholder for each value to be printed. Format specs and
-        conversions are not supported.
+        conversions are not supported. All values must be scalars.
       * In TPU, if ``fmt`` contains placeholders, all values must be 32-bit
         integers. If there are no placeholders, the values are printed after
-        the format string.
-    *args: The scalar values to print.
+        the format string. All values must be scalars.
+    *args: The values to print.
   """  # fmt: skip
   has_placeholders = False
   if fmt:
@@ -771,9 +771,7 @@ def debug_print_impl(*args: Any, fmt: str, has_placeholders: bool):
 
 @debug_print_p.def_effectful_abstract_eval
 def debug_print_abstract_eval(*avals: Any, fmt: str, has_placeholders: bool):
-  del fmt, has_placeholders
-  if any(aval.shape for aval in avals):
-    raise ValueError("Only scalar values are supported")
+  del avals, fmt, has_placeholders  # Unused.
   return [], {debug_print_effect}
 
 
@@ -830,7 +828,7 @@ def run_scoped(f: Callable[..., Any], *types, **kw_types) -> Any:
 
   flat_types, in_tree = tree_util.tree_flatten((types, kw_types))
   flat_fun, out_tree_thunk = api_util.flatten_fun(lu.wrap_init(f), in_tree)
-  avals = [t.get_aval() for t in flat_types]
+  avals = [t.get_ref_aval() for t in flat_types]
   # Turn the function into a jaxpr. The body of run_scoped may have
   # effects (IO) on constvars (i.e. variables inherited from the
   # parent scope). Jax can't reason about effects to references that

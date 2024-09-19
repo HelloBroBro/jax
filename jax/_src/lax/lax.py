@@ -2012,9 +2012,19 @@ mlir.register_lowering(cos_p, _cos_lowering)
 def _tan_impl(x):
   return div(sin(x), cos(x))
 
+def _tan_lowering(ctx, x):
+  # TODO(b/368011034): Remove after jaxlib 0.4.34 release. In 0.4.33, this
+  # lowering is supported, but export doesn't target a sufficiently up-to-date
+  # StableHLO version, and the compatibility updates from
+  # https://github.com/openxla/xla/pull/16649 aren't included in the 0.4.33
+  # release.
+  if ctx.is_forward_compat():
+    return _nary_lower_hlo(chlo.tan, ctx, x)
+  return _nary_lower_hlo(hlo.tan, ctx, x)
+
 tan_p = standard_unop(_float | _complex, 'tan')
 ad.defjvp2(tan_p, lambda g, ans, x: mul(g, _const(x, 1) + square(ans)))
-mlir.register_lowering(tan_p, partial(_nary_lower_hlo, chlo.tan))
+mlir.register_lowering(tan_p, _tan_lowering)
 
 def asin_impl(x):
   if dtypes.issubdtype(_dtype(x), np.complexfloating):
@@ -2300,7 +2310,7 @@ def _add_jvp(primals, tangents):
   xdot, ydot = tangents
   primal_out = add(x, y)
   if type(xdot) is type(ydot) is ad_util.Zero:
-    return primal_out, ad_util.Zero.from_value(primal_out)
+    return primal_out, ad_util.Zero.from_primal_value(primal_out)
   if type(xdot) is ad_util.Zero:
     return primal_out, _maybe_broadcast(primal_out.shape, ydot)
   elif type(ydot) is ad_util.Zero:
@@ -2331,7 +2341,7 @@ def _sub_jvp(primals, tangents):
   xdot, ydot = tangents
   primal_out = sub(x, y)
   if type(xdot) is type(ydot) is ad_util.Zero:
-    return primal_out, ad_util.Zero.from_value(primal_out)
+    return primal_out, ad_util.Zero.from_primal_value(primal_out)
   if type(xdot) is ad_util.Zero:
     return primal_out, _maybe_broadcast(primal_out.shape, neg(ydot))
   elif type(ydot) is ad_util.Zero:
@@ -3355,7 +3365,7 @@ def _broadcast_in_dim_jvp_rule(primals, tangents, *, shape, broadcast_dimensions
   y = broadcast_in_dim_p.bind(operand, *dyn_shape, shape=shape,
                               broadcast_dimensions=broadcast_dimensions)
   if type(operand_dot) is ad_util.Zero:
-    y_dot = ad_util.Zero.from_value(y)
+    y_dot = ad_util.Zero.from_primal_value(y)
   else:
     y_dot = broadcast_in_dim_p.bind(operand_dot, *dyn_shape, shape=shape,
                                     broadcast_dimensions=broadcast_dimensions)
@@ -4525,7 +4535,7 @@ def _top_k_jvp(primals, tangents, *, k):
   tangent, = tangents
   primals_out = top_k(operand, k)
   if type(tangent) is ad_util.Zero:
-    tangent_out = ad_util.Zero.from_value(primals_out[0])
+    tangent_out = ad_util.Zero.from_primal_value(primals_out[0])
   else:
     _, k_idxs = primals_out
     idx_shape = k_idxs.shape
@@ -4544,7 +4554,7 @@ def _top_k_jvp(primals, tangents, *, k):
       collapsed_slice_dims=tuple(range(rank)),
       start_index_map=tuple(range(rank)))
     tangent_out = slicing.gather(tangent, gather_indices, dnums, slice_sizes)
-  return primals_out, (tangent_out, ad_util.Zero.from_value(primals_out[1]))
+  return primals_out, (tangent_out, ad_util.Zero.from_primal_value(primals_out[1]))
 
 def _top_k_batch_rule(batched_args, batch_dims, *, k):
   operand, = batched_args
@@ -4580,7 +4590,7 @@ batching.primitive_batchers[top_k_p] = _top_k_batch_rule
 def _stop_gradient_jvp_rule(primals, tangents):
   # if we don't call stop_gradient here, we'd only peel off one autodiff tracer
   x, = primals
-  return stop_gradient(x), ad_util.Zero.from_value(x)
+  return stop_gradient(x), ad_util.Zero.from_primal_value(x)
 
 def _stop_gradient_batch_rule(batched_args, batch_dims):
   x, = batched_args
