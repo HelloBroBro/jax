@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax import random
 from jax._src import config
+from jax._src import dtypes
 from jax._src import linear_util as lu
 from jax._src import state
 from jax._src import test_util as jtu
@@ -57,6 +58,10 @@ import hypothesis.strategies as hps
 
 jax.config.parse_flags_with_absl()
 jtu.setup_hypothesis(max_examples=50)
+
+
+intx = dtypes.canonicalize_dtype(jnp.int64)
+floatx = dtypes.canonicalize_dtype(jnp.float64)
 
 
 def smem_on_tpu():
@@ -245,8 +250,6 @@ class PallasBaseTest(jtu.JaxTestCase):
   INTERPRET = False
 
   def setUp(self):
-    if jax.config.x64_enabled:
-      self.skipTest("Only works in 32-bit")
     if not self.INTERPRET:
       if jtu.device_under_test() == "cpu":
         self.skipTest("Only interpret mode supported on CPU")
@@ -262,11 +265,6 @@ class PallasBaseTest(jtu.JaxTestCase):
 
 
 class OpsTest(PallasBaseTest):
-
-  def setUp(self):
-    super().setUp()
-    if jax.config.x64_enabled:
-      self.skipTest("Only works in 32-bit")
 
   @parameterized.named_parameters(
       (fn.__name__, fn, dtype) for fn, dtype in [
@@ -340,7 +338,7 @@ class OpsTest(PallasBaseTest):
 
     result = self.pallas_call(
         kernel,
-        out_shape=jax.ShapeDtypeStruct([1, 128], jnp.int32),
+        out_shape=jax.ShapeDtypeStruct([1, 128], intx),
         in_specs=[
             pl.BlockSpec(memory_space=smem_on_tpu()),
             pl.BlockSpec(memory_space=smem_on_tpu()),
@@ -435,13 +433,15 @@ class OpsTest(PallasBaseTest):
       float_value = jnp.where(reduced_as_bool, 1.0, 0.0)
       o_ref[0, 0] = float_value[0, 0]
 
-    if input_type == 'all_true':
+    if input_type == "all_true":
       x = jnp.ones((8, 128), dtype=jnp.float32)
-    elif input_type == 'all_false':
+    elif input_type == "all_false":
       x = jnp.zeros((8, 128), dtype=jnp.float32)
-    elif input_type == 'one_false':
+    elif input_type == "one_false":
       x = jnp.ones((8, 128), dtype=jnp.float32)
       x = x.at[0, 0].set(0.0)
+    else:
+      raise ValueError(f"Unknown input type: {input_type}")
     ones = jnp.ones_like(x)
 
     result = self.pallas_call(
@@ -451,7 +451,7 @@ class OpsTest(PallasBaseTest):
             pl.BlockSpec((8, 128), lambda *_: (0, 0)),
         ],
         out_specs=pl.BlockSpec(block_shape=(1, 1), memory_space=smem_on_tpu()),
-        out_shape=jax.ShapeDtypeStruct([1, 1], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([1, 1], floatx),
         grid=(1,),
     )(x, ones)
     np.testing.assert_array_equal(result[0, 0], float(expected_result))
@@ -473,7 +473,7 @@ class OpsTest(PallasBaseTest):
             pl.BlockSpec((8, 128), lambda *_: (0, 0)),
         ],
         out_specs=pl.BlockSpec((1, 1), memory_space=smem_on_tpu()),
-        out_shape=jax.ShapeDtypeStruct([1, 1], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([1, 1], floatx),
         grid=(1,),
     )(x)
 
@@ -702,22 +702,28 @@ class OpsTest(PallasBaseTest):
       np.testing.assert_array_equal(out, expected)
 
   @parameterized.product(
-      dtype=[jnp.float32],
-      value=[-3.2, -1.0, -0.4, 0., 0.72, 1.0, 2.4],
+      dtype=[jnp.float32, jnp.float64],
+      value=[-3.2, -1.0, -0.999517, -0.4, 0., 0.72, 0.999517, 1.0, 2.4],
   )
   def test_erf_inv(self, dtype, value):
+    if jtu.test_device_matches(["tpu"]) and dtype == jnp.float64:
+      self.skipTest("float64 is not supported on TPU")
+
     @functools.partial(
         self.pallas_call,
-        # TODO(ayx): add float64 support for `erf_inv`
-        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+        out_shape=jax.ShapeDtypeStruct((8, 128), dtype),
     )
     def kernel(x_ref, o_ref):
       o_ref[...] = lax.erf_inv(x_ref[...])
 
-    x = jnp.full((8, 128), value, dtype=dtype)
-    out = kernel(x)
-    expected = lax.erf_inv(x)
-    np.testing.assert_array_equal(out, expected)
+    with contextlib.ExitStack() as stack:
+      if jnp.dtype(dtype).itemsize == 8:
+        stack.enter_context(config.enable_x64(True))
+
+      x = jnp.full((8, 128), value, dtype=dtype)
+      out = kernel(x)
+      expected = lax.erf_inv(x)
+      np.testing.assert_array_equal(out, expected)
 
 
 class OpsInterpretTest(OpsTest):
@@ -746,6 +752,8 @@ class OpsExtraTest(PallasBaseTest):
 
   def setUp(self):
     super().setUp()
+    if jax.config.x64_enabled:
+      self.skipTest("Only works in 32-bit")
     if jtu.test_device_matches(["tpu"]) and not self.INTERPRET:
       # TODO: most tests fail on TPU in non-interpret mode
       self.skipTest("On TPU the test works only in interpret mode")
