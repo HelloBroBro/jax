@@ -237,7 +237,7 @@ def dsd_kernel(idxs_i_ref, idxs_k_ref, # Scalar prefetch inputs.
                ):
   """A DSD (Dense = Sparse @ Dense) matmul kernel."""
   del idxs_k_ref
-  blk_idx = pl.program_id(1)
+  blk_idx = pl.program_id(0)
   is_start = blk_idx == 0
   changed_blocks = (idxs_i_ref[blk_idx] != idxs_i_ref[jnp.maximum(blk_idx-1, 0)])
   @pl.when(is_start | changed_blocks)
@@ -252,13 +252,13 @@ def dsd_kernel(idxs_i_ref, idxs_k_ref, # Scalar prefetch inputs.
     o_ref[...] = accum_scratch[...].astype(o_ref.dtype)
 
 
-def x_map(j, blk_idx, blk_idxs_i, blk_idxs_k):
+def x_map(blk_idx, j, blk_idxs_i, blk_idxs_k):
   del j, blk_idxs_i, blk_idxs_k
   return (blk_idx, 0, 0)
-def y_map(j, blk_idx, blk_idxs_i, blk_idxs_k):
+def y_map(blk_idx, j, blk_idxs_i, blk_idxs_k):
   del blk_idxs_i
   return (blk_idxs_k[blk_idx], j)
-def o_map(j, blk_idx, blk_idxs_i, blk_idxs_k):
+def o_map(blk_idx, j, blk_idxs_i, blk_idxs_k):
   del blk_idxs_k
   return (blk_idxs_i[blk_idx], j)
 
@@ -273,7 +273,7 @@ grid_spec = pltpu.PrefetchScalarGridSpec(
     num_scalar_prefetch=2,
     # Note that while num_blocks is static here, Pallas does support
     # dynamic grid sizes.
-    grid=(M // blk_M, num_blocks),
+    grid=(num_blocks, N // blk_N),
     in_specs=[pl.BlockSpec((1, blk_M, blk_K), x_map),
               pl.BlockSpec((blk_K, blk_N), y_map),
               # Placeholder for a zeros-array used by input_output_aliases.

@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 import operator
+from typing import Any
 
 import numpy as np
 
@@ -636,9 +637,36 @@ def tanh(x: ArrayLike, /) -> Array:
 def arctanh(x: ArrayLike, /) -> Array:
   return lax.atanh(*promote_args_inexact('arctanh', x))
 
-@implements(np.sqrt, module='numpy')
+
 @partial(jit, inline=True)
 def sqrt(x: ArrayLike, /) -> Array:
+  """Calculates element-wise non-negative square root of the input array.
+
+  JAX implementation of :obj:`numpy.sqrt`.
+
+  Args:
+    x: input array or scalar.
+
+  Returns:
+    An array containing the non-negative square root of the elements of ``x``.
+
+  Note:
+    - For real-valued negative inputs, ``jnp.sqrt`` produces a ``nan`` output.
+    - For complex-valued negative inputs, ``jnp.sqrt`` produces a ``complex`` output.
+
+  See also:
+    - :func:`jax.numpy.square`: Calculates the element-wise square of the input.
+    - :func:`jax.numpy.power`: Calculates the element-wise base ``x1`` exponential
+      of ``x2``.
+
+  Examples:
+    >>> x = jnp.array([-8-6j, 1j, 4])
+    >>> with jnp.printoptions(precision=3, suppress=True):
+    ...   jnp.sqrt(x)
+    Array([1.   -3.j   , 0.707+0.707j, 2.   +0.j   ], dtype=complex64)
+    >>> jnp.sqrt(-1)
+    Array(nan, dtype=float32, weak_type=True)
+  """
   return lax.sqrt(*promote_args_inexact('sqrt', x))
 
 @implements(np.cbrt, module='numpy')
@@ -652,12 +680,26 @@ def _add(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   JAX implementation of :obj:`numpy.add`. This is a universal function,
   and supports the additional APIs described at :class:`jax.numpy.ufunc`.
+  This function provides the implementation of the ``+`` operator for
+  JAX arrays.
 
   Args:
     x, y: arrays to add. Must be broadcastable to a common shape.
 
   Returns:
     Array containing the result of the element-wise addition.
+
+  Examples:
+    Calling ``add`` explicitly:
+
+    >>> x = jnp.arange(4)
+    >>> jnp.add(x, 10)
+    Array([10, 11, 12, 13], dtype=int32)
+
+    Calling ``add`` via the ``+`` operator:
+
+    >>> x + 10
+    Array([10, 11, 12, 13], dtype=int32)
   """
   x, y = promote_args("add", x, y)
   return lax.add(x, y) if x.dtype != bool else lax.bitwise_or(x, y)
@@ -668,12 +710,26 @@ def _multiply(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   JAX implementation of :obj:`numpy.multiply`. This is a universal function,
   and supports the additional APIs described at :class:`jax.numpy.ufunc`.
+  This function provides the implementation of the ``*`` operator for
+  JAX arrays.
 
   Args:
     x, y: arrays to multiply. Must be broadcastable to a common shape.
 
   Returns:
     Array containing the result of the element-wise multiplication.
+
+  Examples:
+    Calling ``multiply`` explicitly:
+
+    >>> x = jnp.arange(4)
+    >>> jnp.multiply(x, 10)
+    Array([ 0, 10, 20, 30], dtype=int32)
+
+    Calling ``multiply`` via the ``*`` operator:
+
+    >>> x * 10
+    Array([ 0, 10, 20, 30], dtype=int32)
   """
   x, y = promote_args("multiply", x, y)
   return lax.mul(x, y) if x.dtype != bool else lax.bitwise_and(x, y)
@@ -684,12 +740,26 @@ def _bitwise_and(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   JAX implementation of :obj:`numpy.bitwise_and`. This is a universal function,
   and supports the additional APIs described at :class:`jax.numpy.ufunc`.
+  This function provides the implementation of the ``&`` operator for
+  JAX arrays.
 
   Args:
     x, y: integer or boolean arrays. Must be broadcastable to a common shape.
 
   Returns:
     Array containing the result of the element-wise bitwise AND.
+
+  Examples:
+    Calling ``bitwise_and`` explicitly:
+
+    >>> x = jnp.arange(4)
+    >>> jnp.bitwise_and(x, 1)
+    Array([0, 1, 0, 1], dtype=int32)
+
+    Calling ``bitwise_and`` via the ``&`` operator:
+
+    >>> x & 1
+    Array([0, 1, 0, 1], dtype=int32)
   """
   return lax.bitwise_and(*promote_args("bitwise_and", x, y))
 
@@ -699,12 +769,26 @@ def _bitwise_or(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   JAX implementation of :obj:`numpy.bitwise_or`. This is a universal function,
   and supports the additional APIs described at :class:`jax.numpy.ufunc`.
+  This function provides the implementation of the ``|`` operator for
+  JAX arrays.
 
   Args:
     x, y: integer or boolean arrays. Must be broadcastable to a common shape.
 
   Returns:
     Array containing the result of the element-wise bitwise OR.
+
+  Examples:
+    Calling ``bitwise_or`` explicitly:
+
+    >>> x = jnp.arange(4)
+    >>> jnp.bitwise_or(x, 1)
+    Array([1, 1, 3, 3], dtype=int32)
+
+    Calling ``bitwise_or`` via the ``|`` operator:
+
+    >>> x | 1
+    Array([1, 1, 3, 3], dtype=int32)
   """
   return lax.bitwise_or(*promote_args("bitwise_or", x, y))
 
@@ -714,12 +798,26 @@ def _bitwise_xor(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   JAX implementation of :obj:`numpy.bitwise_xor`. This is a universal function,
   and supports the additional APIs described at :class:`jax.numpy.ufunc`.
+  This function provides the implementation of the ``^`` operator for
+  JAX arrays.
 
   Args:
     x, y: integer or boolean arrays. Must be broadcastable to a common shape.
 
   Returns:
     Array containing the result of the element-wise bitwise XOR.
+
+  Examples:
+    Calling ``bitwise_xor`` explicitly:
+
+    >>> x = jnp.arange(4)
+    >>> jnp.bitwise_xor(x, 1)
+    Array([1, 0, 3, 2], dtype=int32)
+
+    Calling ``bitwise_xor`` via the ``^`` operator:
+
+    >>> x ^ 1
+    Array([1, 0, 3, 2], dtype=int32)
   """
   return lax.bitwise_xor(*promote_args("bitwise_xor", x, y))
 
@@ -958,6 +1056,11 @@ def _logical_and(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   Returns:
     Array containing the result of the element-wise logical AND.
+
+  Examples:
+    >>> x = jnp.arange(4)
+    >>> jnp.logical_and(x, 1)
+    Array([False,  True,  True,  True], dtype=bool)
   """
   return lax.bitwise_and(*map(_to_bool, promote_args("logical_and", x, y)))
 
@@ -973,6 +1076,11 @@ def _logical_or(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   Returns:
     Array containing the result of the element-wise logical OR.
+
+  Examples:
+    >>> x = jnp.arange(4)
+    >>> jnp.logical_or(x, 1)
+    Array([ True,  True,  True,  True], dtype=bool)
   """
   return lax.bitwise_or(*map(_to_bool, promote_args("logical_or", x, y)))
 
@@ -988,6 +1096,11 @@ def _logical_xor(x: ArrayLike, y: ArrayLike, /) -> Array:
 
   Returns:
     Array containing the result of the element-wise logical XOR.
+
+  Examples:
+    >>> x = jnp.arange(4)
+    >>> jnp.logical_xor(x, 1)
+    Array([ True, False, False, False], dtype=bool)
   """
   return lax.bitwise_xor(*map(_to_bool, promote_args("logical_xor", x, y)))
 
@@ -1373,7 +1486,7 @@ def rint(x: ArrayLike, /) -> Array:
     If an element of x is exactly half way, e.g. ``0.5`` or ``1.5``, rint will round
     to the nearest even integer.
 
-  Example:
+  Examples:
     >>> x1 = jnp.array([5, 4, 7])
     >>> jnp.rint(x1)
     Array([5., 4., 7.], dtype=float32)
@@ -2077,9 +2190,50 @@ def fmod(x1: ArrayLike, x2: ArrayLike, /) -> Array:
   return lax.rem(*promote_args_numeric("fmod", x1, x2))
 
 
-@implements(np.square, module='numpy')
 @partial(jit, inline=True)
 def square(x: ArrayLike, /) -> Array:
+  """Calculate element-wise square of the input array.
+
+  JAX implementation of :obj:`numpy.square`.
+
+  Args:
+    x: input array or scalar.
+
+  Returns:
+    An array containing the square of the elements of ``x``.
+
+  Note:
+    ``jnp.square`` is equivalent to computing ``jnp.power(x, 2)``.
+
+  See also:
+    - :func:`jax.numpy.sqrt`: Calculates the element-wise non-negative square root
+      of the input array.
+    - :func:`jax.numpy.power`: Calculates the element-wise base ``x1`` exponential
+      of ``x2``.
+    - :func:`jax.lax.integer_pow`: Computes element-wise power :math:`x^y`, where
+      :math:`y` is a fixed integer.
+    - :func:`jax.numpy.float_power`: Computes the first array raised to the power
+      of second array, element-wise, by promoting to the inexact dtype.
+
+  Examples:
+    >>> x = jnp.array([3, -2, 5.3, 1])
+    >>> jnp.square(x)
+    Array([ 9.      ,  4.      , 28.090002,  1.      ], dtype=float32)
+    >>> jnp.power(x, 2)
+    Array([ 9.      ,  4.      , 28.090002,  1.      ], dtype=float32)
+
+    For integer inputs:
+
+    >>> x1 = jnp.array([2, 4, 5, 6])
+    >>> jnp.square(x1)
+    Array([ 4, 16, 25, 36], dtype=int32)
+
+    For complex-valued inputs:
+
+    >>> x2 = jnp.array([1-3j, -1j, 2])
+    >>> jnp.square(x2)
+    Array([-8.-6.j, -1.+0.j,  4.+0.j], dtype=complex64)
+  """
   check_arraylike("square", x)
   x, = promote_dtypes_numeric(x)
   return lax.integer_pow(x, 2)
@@ -2163,30 +2317,127 @@ def radians(x: ArrayLike, /) -> Array:
   return deg2rad(x)
 
 
-@implements(np.conjugate, module='numpy')
 @partial(jit, inline=True)
 def conjugate(x: ArrayLike, /) -> Array:
+  """Return element-wise complex-conjugate of the input.
+
+  JAX implementation of :obj:`numpy.conjugate`.
+
+  Args:
+    x: inpuat array or scalar.
+
+  Returns:
+    An array containing the complex-conjugate of ``x``.
+
+  See also:
+    - :func:`jax.numpy.real`: Returns the element-wise real part of the complex
+      argument.
+    - :func:`jax.numpy.imag`: Returns the element-wise imaginary part of the
+      complex argument.
+
+  Examples:
+    >>> jnp.conjugate(3)
+    Array(3, dtype=int32, weak_type=True)
+    >>> x = jnp.array([2-1j, 3+5j, 7])
+    >>> jnp.conjugate(x)
+    Array([2.+1.j, 3.-5.j, 7.-0.j], dtype=complex64)
+  """
   check_arraylike("conjugate", x)
   return lax.conj(x) if np.iscomplexobj(x) else lax.asarray(x)
-conj = conjugate
 
 
-@implements(np.imag)
+def conj(x: ArrayLike, /) -> Array:
+  """Alias of :func:`jax.numpy.conjugate`"""
+  return conjugate(x)
+
+
 @partial(jit, inline=True)
 def imag(val: ArrayLike, /) -> Array:
+  """Return element-wise imaginary of part of the complex argument.
+
+  JAX implementation of :obj:`numpy.imag`.
+
+  Args:
+    val: input array or scalar.
+
+  Returns:
+    An array containing the imaginary part of the elements of ``val``.
+
+  See also:
+    - :func:`jax.numpy.conjugate` and :func:`jax.numpy.conj`: Returns the element-wise
+      complex-conjugate of the input.
+    - :func:`jax.numpy.real`: Returns the element-wise real part of the complex
+      argument.
+
+  Examples:
+    >>> jnp.imag(4)
+    Array(0, dtype=int32, weak_type=True)
+    >>> jnp.imag(5j)
+    Array(5., dtype=float32, weak_type=True)
+    >>> x = jnp.array([2+3j, 5-1j, -3])
+    >>> jnp.imag(x)
+    Array([ 3., -1.,  0.], dtype=float32)
+  """
   check_arraylike("imag", val)
   return lax.imag(val) if np.iscomplexobj(val) else lax.full_like(val, 0)
 
 
-@implements(np.real)
 @partial(jit, inline=True)
 def real(val: ArrayLike, /) -> Array:
+  """Return element-wise real part of the complex argument.
+
+  JAX implementation of :obj:`numpy.real`.
+
+  Args:
+    val: input array or scalar.
+
+  Returns:
+    An array containing the real part of the elements of ``val``.
+
+  See also:
+    - :func:`jax.numpy.conjugate` and :func:`jax.numpy.conj`: Returns the element-wise
+      complex-conjugate of the input.
+    - :func:`jax.numpy.imag`: Returns the element-wise imaginary part of the
+      complex argument.
+
+  Examples:
+    >>> jnp.real(5)
+    Array(5, dtype=int32, weak_type=True)
+    >>> jnp.real(2j)
+    Array(0., dtype=float32, weak_type=True)
+    >>> x = jnp.array([3-2j, 4+7j, -2j])
+    >>> jnp.real(x)
+    Array([ 3.,  4., -0.], dtype=float32)
+  """
   check_arraylike("real", val)
   return lax.real(val) if np.iscomplexobj(val) else lax.asarray(val)
 
-@implements(np.modf, module='numpy', skip_params=['out'])
+
 @jit
 def modf(x: ArrayLike, /, out=None) -> tuple[Array, Array]:
+  """Return element-wise fractional and integral parts of the input array.
+
+  JAX implementation of :obj:`numpy.modf`.
+
+  Args:
+    x: input array or scalar.
+    out: Not used by JAX.
+
+  Returns:
+    An array containing the fractional and integral parts of the elements of ``x``,
+    promoting dtypes inexact.
+
+  See also:
+    - :func:`jax.numpy.divmod`: Calculates the integer quotient and remainder of
+      ``x1`` by ``x2`` element-wise.
+
+  Examples:
+    >>> jnp.modf(4.8)
+    (Array(0.8000002, dtype=float32, weak_type=True), Array(4., dtype=float32, weak_type=True))
+    >>> x = jnp.array([-3.4, -5.7, 0.6, 1.5, 2.3])
+    >>> jnp.modf(x)
+    (Array([-0.4000001 , -0.6999998 ,  0.6       ,  0.5       ,  0.29999995],      dtype=float32), Array([-3., -5.,  0.,  1.,  2.], dtype=float32))
+  """
   check_arraylike("modf", x)
   x, = promote_dtypes_inexact(x)
   if out is not None:
@@ -2334,6 +2585,20 @@ def _logical_or_reduce(a: ArrayLike, axis: int = 0, dtype: DTypeLike | None = No
   result = reductions.any(a, axis=axis, out=out, keepdims=keepdims, where=where)
   return result if dtype is None else result.astype(dtype)
 
+def _add_at(a: Array, indices: Any, b: ArrayLike):
+  if a.dtype == bool:
+    a = a.astype('int32')
+    b = lax.convert_element_type(b, bool).astype('int32')
+    return a.at[indices].add(b).astype(bool)
+  return a.at[indices].add(b)
+
+def _multiply_at(a: Array, indices: Any, b: ArrayLike):
+  if a.dtype == bool:
+    a = a.astype('int32')
+    b = lax.convert_element_type(b, bool).astype('int32')
+    return a.at[indices].mul(b).astype(bool)
+  else:
+    return a.at[indices].mul(b)
 
 # Generate ufunc interfaces for several common binary functions.
 # We start with binary ufuncs that have well-defined identities.'
@@ -2342,8 +2607,8 @@ def _logical_or_reduce(a: ArrayLike, axis: int = 0, dtype: DTypeLike | None = No
 # - define add.at/multiply.at in terms of scatter_add/scatter_mul
 # - define add.reduceat/multiply.reduceat in terms of segment_sum/segment_prod
 # - define all monoidal reductions in terms of lax.reduce
-add = ufunc(_add, name="add", nin=2, nout=1, identity=0, call=_add, reduce=reductions.sum, accumulate=reductions.cumsum)
-multiply = ufunc(_multiply, name="multiply", nin=2, nout=1, identity=1, call=_multiply, reduce=reductions.prod, accumulate=reductions.cumprod)
+add = ufunc(_add, name="add", nin=2, nout=1, identity=0, call=_add, reduce=reductions.sum, accumulate=reductions.cumsum, at=_add_at)
+multiply = ufunc(_multiply, name="multiply", nin=2, nout=1, identity=1, call=_multiply, reduce=reductions.prod, accumulate=reductions.cumprod, at=_multiply_at)
 bitwise_and = ufunc(_bitwise_and, name="bitwise_and", nin=2, nout=1, identity=-1, call=_bitwise_and)
 bitwise_or = ufunc(_bitwise_or, name="bitwise_or", nin=2, nout=1, identity=0, call=_bitwise_or)
 bitwise_xor = ufunc(_bitwise_xor, name="bitwise_xor", nin=2, nout=1, identity=0, call=_bitwise_xor)
