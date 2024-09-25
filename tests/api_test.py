@@ -733,13 +733,12 @@ class JitTest(jtu.BufferDonationTestCase):
     def f(x):
       return x
 
-    with self.assertRaisesRegex(
-        TypeError, r".* 'foo' of type <.*'str'> is not a valid JAX type"):
+    err_str = ("Error interpreting argument to .* as an abstract array. The problematic "
+               "value is of type .* and was passed to the function at path x.")
+    with self.assertRaisesRegex(TypeError, err_str):
       jit(f)("foo")
 
     # Jax type objects aren't valid data arguments.
-    err_str = "JAX scalar type .*int32.* cannot be interpreted as a JAX array."
-
     with self.assertRaisesRegex(TypeError, err_str):
       jit(f)(jnp.int32)
 
@@ -1576,13 +1575,14 @@ class APITest(jtu.JaxTestCase):
     def f(x):
       return x
 
-    self.assertRaisesRegex(
-      TypeError, ".* 'foo' of type <.*'str'> is not a valid JAX type",
-      lambda: grad(f)("foo"))
+    with self.assertRaisesRegex(TypeError, ".* 'foo' of type <.*'str'> is not a valid JAX type"):
+      grad(f)("foo")
 
-    self.assertRaisesRegex(
-      TypeError, ".* 'foo' of type <.*'str'> is not a valid JAX type",
-      lambda: jit(f)("foo"))
+
+    err_str = ("Error interpreting argument to .* as an abstract array. The problematic "
+               "value is of type .* and was passed to the function at path x.")
+    with self.assertRaisesRegex(TypeError, err_str):
+      jit(f)("foo")
 
   def test_grad_tuple_output(self):
     jtu.check_raises(lambda: grad(lambda x: (x,x))(1.0), TypeError,
@@ -2959,8 +2959,10 @@ class APITest(jtu.JaxTestCase):
                   lambda: jnp.arange(1.0).astype(int))
 
   def test_error_for_invalid_dtype(self):
+    err_str = ("Error interpreting argument to .* as an abstract array. The problematic "
+               r"value is of type .* and was passed to the function at path args\[1\].")
     with jax.enable_checks(False):
-      with self.assertRaisesRegex(TypeError, ".*not a valid JAX array type.*"):
+      with self.assertRaisesRegex(TypeError, err_str):
         lax.add(jnp.array(7), np.array("hello"))
     with jax.enable_checks(True):
       with self.assertRaises(AssertionError):
@@ -5765,6 +5767,27 @@ class RematTest(jtu.JaxTestCase):
     self.assertEqual(res[4][0].shape, ())
     self.assertStartsWith(res[4][1], "named 'z'")
     self.assertEqual(res[5][0].shape, ())
+
+  def test_saved_residuals_utility_jit(self):
+    @jax.jit
+    def f(x, y):
+      x1, x2 = x
+      z = checkpoint_name(jnp.sin(3.), 'z')
+      return z * ((x1 * x2) * y) * np.array([3.])
+
+    res = saved_residuals(f, (2., 3.), y=4.)
+    self.assertLen(res, 6)
+    self.assertEqual(res[0][0].shape, ())
+    self.assertEqual(res[0][1], "from the argument x[0]")
+    self.assertEqual(res[1][0].shape, ())
+    self.assertEqual(res[1][1], "from the argument x[1]")
+    self.assertEqual(res[2][0].shape, ())
+    self.assertEqual(res[2][1], "from the argument y")
+    self.assertEqual(res[3][0].shape, ())
+    self.assertStartsWith(res[3][1], "output of jitted function 'f'")
+    self.assertEqual(res[4][0].shape, ())
+    self.assertEqual(res[5][0].shape, (1,))
+    self.assertStartsWith(res[5][1], "output of jitted function 'f'")
 
   @parameterized.named_parameters(
       {"testcase_name": f"{suffix}", "remat": remat}

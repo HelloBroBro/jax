@@ -1608,12 +1608,6 @@ def physical_element_aval(edtype: dtypes.ExtendedDType) -> ShapedArray:
   duck = edtype._rules.physical_element_aval(edtype)  # type: ignore
   return ShapedArray(duck.shape, dtypes.dtype(duck.dtype))
 
-def _short_dtype_name(dtype) -> str:
-  if isinstance(dtype, dtypes.ExtendedDType):
-    return str(dtype)
-  else:
-    return (dtype.name.replace('float', 'f').replace('uint'   , 'u')
-                      .replace('int'  , 'i').replace('complex', 'c'))
 
 def _dtype_object(dtype):
   return dtype if isinstance(dtype, dtypes.ExtendedDType) else np.dtype(dtype)
@@ -1672,7 +1666,7 @@ class UnshapedArray(AbstractValue):
       raise TypeError(self, other)
 
   def str_short(self, short_dtypes=False) -> str:
-    return _short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
+    return dtypes.short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
 
   def strip_weak_type(self):
     """Returns a copy of the aval with weak_type=False."""
@@ -1811,7 +1805,7 @@ class ShapedArray(UnshapedArray):
       raise TypeError(self, other)
 
   def str_short(self, short_dtypes=False):
-    dt_str =  _short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
+    dt_str =  dtypes.short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
     dt_str = dt_str.replace('void', 'float0')
     shapestr = ','.join(map(str, self.shape))
     if hasattr(self, 'sharding'):
@@ -1872,7 +1866,7 @@ class ConcreteArray(ShapedArray):
       raise TypeError(self, other)
 
   def str_short(self, short_dtypes=False) -> str:
-    dt_str =  _short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
+    dt_str = dtypes.short_dtype_name(self.dtype) if short_dtypes else self.dtype.name
     return f'{self.val}, dtype={dt_str}'
 
   _bool    = partialmethod(_forward_to_value, bool)
@@ -1922,7 +1916,7 @@ class DShapedArray(UnshapedArray):
   def str_short(self, short_dtypes=False) -> str:
     del short_dtypes  # ignored
     shape = f'{",".join(str(d) for d in self.shape)}' if self.shape else ''
-    dtype = _short_dtype_name(self.dtype)
+    dtype = dtypes.short_dtype_name(self.dtype)
     return f'{dtype}[{shape}]'
   __str__ = __repr__ = str_short
 
@@ -1989,7 +1983,7 @@ class DArray:
       # special-case scalar bints
       return f'{int(self._data)}{{≤{self.dtype.bound}}}'
 
-    dtypestr = _short_dtype_name(self._aval.dtype)
+    dtypestr = dtypes.short_dtype_name(self._aval.dtype)
     shapestr = ','.join(map(str, self.shape))
     data = self.data
     return f'{dtypestr}[{shapestr}] with value: {data}'
@@ -3203,7 +3197,7 @@ def pp_var(v: Var | Literal, context: JaxprPpContext) -> str:
 def pp_aval(a: AbstractValue, context: JaxprPpContext) -> str:
   if isinstance(a, DShapedArray):
     shape = [pp_var(d, context) if type(d) is Var else str(d) for d in a.shape]
-    dtype = _short_dtype_name(a.dtype)
+    dtype = dtypes.short_dtype_name(a.dtype)
     return f'{dtype}[{",".join(shape)}]'
   else:
     return a.str_short(short_dtypes=True)
@@ -3410,3 +3404,53 @@ def clean_up_dead_vars(eqn: JaxprEqn, env: dict[Var, Any],
 # Used in shard_map for converting avals
 shard_aval_handlers = {}  # type: ignore
 unshard_aval_handlers = {}  # type: ignore
+
+# ----------------- external APIs for querying tracing context -----------------
+
+# TODO(dougalm, jakevdp): expose these via jax.extend
+
+# Comparable object for checking whether JAX's trace state has changed.
+class OpaqueTraceState:
+  def __init__(self, trace_info, convention):
+    self._trace_info = trace_info
+    self._convention = convention
+
+  def __eq__(self, other):
+    if isinstance(other, OpaqueTraceState):
+      if self._convention in ["nnx"]:
+        return self._trace_info is other._trace_info
+      elif self._convention in ["haiku", "flax"]:
+        return self._trace_info == other._trace_info
+      else:
+        raise Exception(f"unrecognized convention: {self._convention}")
+
+
+# Each library has its own opinion about what the important fragment of jax's
+# internal state is. TODO: reconcile the differences and remove the flag.
+def get_opaque_trace_state(convention="flax"):
+  if convention == "flax":
+    trace_info = find_top_trace(()).level
+  elif convention == "haiku":
+    trace_stack = thread_local_state.trace_state.trace_stack.stack
+    top_type = trace_stack[0].trace_type
+    level = trace_stack[-1].level
+    sublevel = cur_sublevel()
+    trace_info =  (top_type, level, sublevel)
+  elif convention == "nnx":
+    trace_info = thread_local_state.trace_state.trace_stack.dynamic
+  else:
+    raise Exception(f"unrecognized convention: {convention}")
+
+  return OpaqueTraceState(trace_info, convention)
+
+def nonempty_axis_env() -> bool:
+  return bool(thread_local_state.trace_state.axis_env)
+
+def unsafe_am_i_under_a_jit() -> bool:
+  return 'DynamicJaxprTrace' in str(thread_local_state.trace_state.trace_stack)
+
+def unsafe_am_i_under_a_vmap() -> bool:
+  return 'BatchTrace' in str(thread_local_state.trace_state.trace_stack)
+
+def unsafe_get_axis_names() -> list[str]:
+  return [axis.name for axis in thread_local_state.trace_state.axis_env]
