@@ -227,35 +227,52 @@ class PallasCallTest(PallasTest):
 
     self.assertEqual(output(), "It works!\n")
 
-  def test_print_with_values(self):
+  def test_print_scalar(self):
     @functools.partial(
         pl.pallas_call,
-        out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
     )
     def kernel(x_ref, o_ref):
       del o_ref
-      pl.debug_print("x[0] = {}", x_ref[0])
+      pl.debug_print("x.sum() = {}", x_ref[...].sum())
 
-    x = jnp.arange(256).astype(jnp.float32)
-    with self.assertRaises(Exception):
-      # TODO(slebedev): Remove assertRaises() once we support indexing.
-      kernel(x)
+    x = jnp.arange(256)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+
+    self.assertIn(f"x.sum() = {x.sum()}", output())
+
+  def test_print_scalar_array(self):
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
+    )
+    def kernel(x_ref, o_ref):
+      del o_ref
+      pl.debug_print("x.sum() = {}", x_ref[...].sum() + 1)
+
+    x = jnp.arange(256)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+
+    self.assertIn(f"x.sum() = {x.sum() + 1}", output())
 
   def test_print_array(self):
     in_shape = [2, 1, 64, 64]
+
     @functools.partial(
         pl.pallas_call,
-        out_shape=jax.ShapeDtypeStruct(in_shape, jnp.float32),
+        out_shape=jax.ShapeDtypeStruct(in_shape, jnp.int32),
     )
     def kernel(x_ref, o_ref):
       del o_ref
       pl.debug_print("x: {}", x_ref[...])
 
-    x = jnp.arange(math.prod(in_shape)).reshape(in_shape).astype(jnp.float32)
+    x = jnp.arange(math.prod(in_shape)).reshape(in_shape)
     with jtu.capture_stdout() as output:
       jax.block_until_ready(kernel(x))
 
-    self.assertIn(f"x: [1, 0, 43, 23]/{list(in_shape)}: 6871.000000\n", output())
+    self.assertIn(f"x: [1, 0, 43, 23]/{in_shape}: 6871\n", output())
 
   def test_scoped_allocation(self):
     def kernel(x_ref, o_ref):
@@ -328,7 +345,7 @@ class PallasCallTest(PallasTest):
     result = kernel(x)
     self.assertEqual(result.shape, (4, 2, 64, 64))
 
-  def test_fori_loop(self):
+  def test_fori_loop_array(self):
     @functools.partial(
         pl.pallas_call,
         out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
@@ -340,13 +357,31 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(256).astype(jnp.float32)
     np.testing.assert_array_equal(kernel(x), x + 2.0 + 3.0)
 
-  def test_wgmma(self):
-    dtype = jnp.float16
+  def test_fori_loop_scalar(self):
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
+    )
+    def kernel(o_ref):
+      # Equivalent to 2 + 3.
+      o_ref[...] = jax.lax.broadcast(
+          jax.lax.fori_loop(2, 4, lambda i, x: x + i, 0.0), o_ref.shape
+      )
+
+    np.testing.assert_array_equal(
+        kernel(), jnp.full([256], 5.0, dtype=jnp.float32)
+    )
+
+  @parameterized.parameters(jnp.float16, jnp.float32)
+  def test_wgmma(self, dtype):
+    # TensorCores can only fuse transposes of 16-bit values, and RHS
+    # is expected to be column major by default.
+    rhs_transpose = jnp.dtype(dtype).itemsize != 2
     swizzle = 128
     elems_128b = swizzle // jnp.dtype(dtype).itemsize
     def kernel(a_ref, b_ref, o_ref):
       acc = plgpu.zero_accumulator((64, 128), jnp.float32)
-      acc = plgpu.wgmma(acc, a_ref, b_ref, rhs_transpose=False)
+      acc = plgpu.wgmma(acc, a_ref, b_ref, rhs_transpose=rhs_transpose)
       plgpu.wgmma_wait(0)
       # TODO(cperivol): turn acc into a reference so we can reason about effects.
       o_ref[...] = acc.as_array()
@@ -367,6 +402,7 @@ class PallasCallTest(PallasTest):
             plgpu.GPUBlockSpec(
                 (128, 128),
                 lambda *i: i,
+                transpose_permutation=(1, 0, 2, 3) if rhs_transpose else None,
                 tiling=(elems_128b, elems_128b),
                 swizzle=128,
             ),
@@ -376,7 +412,7 @@ class PallasCallTest(PallasTest):
         grid=(1, 1),
     )(a, b)
     np.testing.assert_allclose(
-        res, a @ b, rtol=1e-3
+        res, a @ (b.T if rhs_transpose else b), rtol=1e-3
     )
 
   def test_input_output_aliases(self):
