@@ -41,13 +41,13 @@ class GPUCompilerParams(pallas_core.CompilerParams):
       dimension of the kernel. Either "parallel" for dimensions that can
       execute in any order, or "sequential" for dimensions that must be
       executed sequentially.
-    num_stages: The number of pipline stages in the kernel. Defaults to 1,
-      meaning no pipelining is done.
+    max_concurrent_steps: The maximum number of sequential stages that are
+      active concurrently. Defaults to 1.
   """
   PLATFORM: ClassVar[str] = "mosaic_gpu"
   approx_math: bool = False
   dimension_semantics: Sequence[Literal["parallel", "sequential"]] | None = None
-  num_stages: int = 1
+  max_concurrent_steps: int = 1
 
 
 class GPUMemorySpace(enum.Enum):
@@ -132,10 +132,8 @@ class GPUBlockMapping(pallas_core.BlockMapping):
 
 @dataclasses.dataclass
 class GPUBlockSpec(pallas_core.BlockSpec):
-  # TODO(justinfu): Replace tiling a list of transforms.
-  tiling: tuple[int, ...] | None = None
-  transpose_permutation: tuple[int, ...] | None = None
-  swizzle: int | None = None
+  transforms: MemoryRefTransform | tuple[MemoryRefTransform, ...] = ()
+  swizzle: int | None = None  # TODO: apaszke - Swizzle is also a transform.
 
   def to_block_mapping(
       self,
@@ -155,11 +153,9 @@ class GPUBlockSpec(pallas_core.BlockSpec):
         grid=grid,
         mapped_dims=mapped_dims,
     )
-    transforms: tuple[pallas_core.MemoryRefTransform, ...] = ()
-    if self.tiling is not None:
-      transforms += (TilingTransform(self.tiling),)
-    if self.transpose_permutation is not None:
-      transforms += (TransposeTransform(self.transpose_permutation),)
+    transforms = self.transforms
+    if not isinstance(transforms, tuple):
+      transforms = (transforms,)
     return GPUBlockMapping(
         block_shape=bm.block_shape,
         block_aval=bm.block_aval,
@@ -203,3 +199,53 @@ class Barrier:
         [self.num_barriers], BarrierType(self.num_arrivals)
     )
     return AbstractMemoryRef(aval, SMEM)
+
+
+@dataclasses.dataclass(frozen=True)
+class WGMMAAccumulatorRef:
+  shape: tuple[int, int]
+  dtype: jnp.dtype = jnp.float32
+
+  def get_ref_aval(self) -> AbstractMemoryRef:
+    return WGMMAAbstractAccumulatorRef(
+        jax_core.ShapedArray(shape=self.shape, dtype=self.dtype), GPUMemorySpace.REGS
+    )
+
+
+def _is_trivial_index(idx):
+  _is_deref1 = lambda i: i is Ellipsis or i == slice(None)
+  if isinstance(idx, tuple):
+    return all(_is_deref1(i) for i in idx)
+
+  return _is_deref1(idx)
+
+class WGMMAAbstractAccumulatorRef(AbstractMemoryRef):
+  __slots__ = ["inner_aval", "memory_space"]
+
+  def __repr__(self) -> str:
+    return f'Accumulator{{{self.inner_aval.str_short()}}}'
+
+  def join(self, other):
+    return _as_accum(super().join(other))
+
+  def update(self, inner_aval=None, memory_space=None):
+    return _as_accum(super().update(inner_aval=None, memory_space=None))
+
+  def at_least_vspace(self):
+    return _as_accum(super().at_least_vspace())
+
+  def _getitem(self, tracer, idx):
+    if not _is_trivial_index(idx):
+      raise NotImplementedError(f"Can only dereference accumulators, not slice ({idx=}).")
+    from jax._src.pallas.mosaic_gpu.primitives import wgmma_accumulator_deref  # pytype: disable=import-error
+    return wgmma_accumulator_deref(tracer)
+
+def _as_accum(ref) -> WGMMAAbstractAccumulatorRef:
+  return WGMMAAbstractAccumulatorRef(
+      inner_aval=ref.inner_aval,
+      memory_space=ref.memory_space,  # pytype: disable=attribute-error
+  )
+
+def _ref_raise_to_shaped(ref_aval, weak_type):
+  return _as_accum(jax_core.raise_to_shaped_mappings[AbstractMemoryRef](ref_aval, weak_type))
+jax_core.raise_to_shaped_mappings[WGMMAAbstractAccumulatorRef] = _ref_raise_to_shaped

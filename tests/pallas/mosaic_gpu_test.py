@@ -96,8 +96,8 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(256).astype(jnp.float32)
     np.testing.assert_array_equal(kernel(x), x + 1.0)
 
-  @parameterized.product(num_stages=[1, 2, 3])
-  def test_add_one_grid_pipelined(self, num_stages):
+  @parameterized.product(max_concurrent_steps=[1, 2, 3, 4])
+  def test_add_one_grid_pipelined(self, max_concurrent_steps):
 
     @functools.partial(
         pl.pallas_call,
@@ -106,9 +106,9 @@ class PallasCallTest(PallasTest):
         out_shape=jax.ShapeDtypeStruct([128 * 2, 64], jnp.float32),
         compiler_params=plgpu.GPUCompilerParams(
             dimension_semantics=["parallel", "sequential"],
-            num_stages=num_stages,
+            max_concurrent_steps=max_concurrent_steps,
         ),
-        grid=(2, 1),
+        grid=(2, 4),
     )
     def kernel(x_ref, o_ref):
       o_ref[...] = x_ref[...] + 1.0
@@ -326,11 +326,15 @@ class PallasCallTest(PallasTest):
     )
 
   def test_swizzled_blockspec_shapes(self):
+
     @functools.partial(
         pl.pallas_call,
         in_specs=[
             plgpu.GPUBlockSpec(
-                (128, 64), lambda *i: i, tiling=(64, 64), swizzle=128
+                (128, 64),
+                lambda *i: i,
+                transforms=plgpu.TilingTransform((64, 64)),
+                swizzle=128,
             ),
         ],
         out_specs=pl.BlockSpec((2, 1, 64, 64), lambda i, j: (i, j, 64, 64)),
@@ -372,6 +376,27 @@ class PallasCallTest(PallasTest):
         kernel(), jnp.full([256], 5.0, dtype=jnp.float32)
     )
 
+  def test_cond(self):
+
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
+    )
+    def kernel(x_ref, o_ref):
+      acc = x_ref[...].sum()
+      jax.lax.cond(
+          acc % 2 == 0,
+          lambda: pl.debug_print("acc * 2: {}", acc * 2),
+          lambda: pl.debug_print("acc: {}", acc),
+      )
+      o_ref[...] = jnp.broadcast_to(acc, o_ref.shape)
+
+    x = jnp.arange(256)
+    with jtu.capture_stdout() as output:
+      jax.block_until_ready(kernel(x))
+
+    self.assertIn("acc * 2:", output())
+
   @parameterized.parameters(jnp.float16, jnp.float32)
   def test_wgmma(self, dtype):
     # TensorCores can only fuse transposes of 16-bit values, and RHS
@@ -380,30 +405,32 @@ class PallasCallTest(PallasTest):
     swizzle = 128
     elems_128b = swizzle // jnp.dtype(dtype).itemsize
     def kernel(a_ref, b_ref, o_ref):
-      acc = plgpu.zero_accumulator((64, 128), jnp.float32)
-      acc = plgpu.wgmma(acc, a_ref, b_ref, rhs_transpose=rhs_transpose)
-      plgpu.wgmma_wait(0)
-      # TODO(cperivol): turn acc into a reference so we can reason about effects.
-      o_ref[...] = acc.as_array()
+      def scope(acc_ref):
+        plgpu.wgmma(acc_ref, a_ref, b_ref, rhs_transpose=rhs_transpose)
+        return acc_ref[...]
+
+      o_ref[...] = pl.run_scoped(scope, plgpu.ACC((64, 128), jnp.float32))
 
     key1, key2 = jax.random.split(jax.random.key(42), 2)
     a = jax.random.uniform(key1, shape=(64, 128), dtype=dtype)
     b = jax.random.uniform(key2, shape=(128, 128), dtype=dtype)
 
+    rhs_transforms = (plgpu.TilingTransform((elems_128b, elems_128b)),)
+    if rhs_transpose:
+      rhs_transforms += (plgpu.TransposeTransform((1, 0, 2, 3)),)
     res = pl.pallas_call(
         kernel,
         in_specs=[
             plgpu.GPUBlockSpec(
                 (64, 128),
                 lambda i, j: (i, j),
-                tiling=(64, elems_128b),
+                transforms=plgpu.TilingTransform((64, elems_128b)),
                 swizzle=128,
             ),
             plgpu.GPUBlockSpec(
                 (128, 128),
                 lambda *i: i,
-                transpose_permutation=(1, 0, 2, 3) if rhs_transpose else None,
-                tiling=(elems_128b, elems_128b),
+                transforms=rhs_transforms,
                 swizzle=128,
             ),
         ],
@@ -430,6 +457,57 @@ class PallasCallTest(PallasTest):
         out_shape=a,
     )(a)
     np.testing.assert_array_equal(b, np.ones_like(a))
+
+  def test_realistic_matmul(self):
+    dtype = jnp.float16
+    swizzle = 128
+    elems_128b = swizzle // jnp.dtype(dtype).itemsize
+    grid_m, grid_k, grid_n = 132, 10, 4
+    tile_m = tile_n = 128
+    tile_k = elems_128b
+    m, k, n = grid_m * tile_m, grid_k * tile_k, grid_n * tile_n
+    def kernel(a_ref, b_ref, o_ref, acc_ref):
+      plgpu.wgmma(acc_ref, a_ref, b_ref)
+      plgpu.wgmma_wait(0)  # TODO(apaszke): Delay the pipeline to avoid memory races
+      # TODO(apaszke): Only store in the last step. It doesn't work because we
+      # don't have partial discharge for control flow.
+      # is_last_step = pl.program_id(2) == grid_k - 1
+      # @pl.when(is_last_step)
+      # def _epilogue():
+      # pl.debug_print("{}", acc_ref[...])
+      # TODO(apaszke): This is an untiled store! It's slow!!
+      o_ref[...] = acc_ref[...]
+
+    key1, key2 = jax.random.split(jax.random.key(42), 2)
+    a = jax.random.uniform(key1, shape=(m, k), dtype=dtype)
+    b = jax.random.uniform(key2, shape=(k, n), dtype=dtype)
+
+    res = pl.pallas_call(
+        kernel,
+        in_specs=[
+            plgpu.GPUBlockSpec(
+                (tile_m, tile_k),
+                lambda m, n, k: (m, k),
+                transforms=plgpu.TilingTransform((64, elems_128b)),
+                swizzle=128,
+            ),
+            plgpu.GPUBlockSpec(
+                (tile_k, tile_n),
+                lambda m, n, k: (k, n),
+                transforms=plgpu.TilingTransform((elems_128b, elems_128b)),
+                swizzle=128,
+            ),
+        ],
+        out_specs=plgpu.GPUBlockSpec((tile_m, tile_n), lambda m, n, k: (m, n)),
+        out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+        scratch_shapes=[plgpu.ACC((tile_m, tile_n), jnp.float32)],
+        grid=(grid_m, grid_n, grid_k),
+        compiler_params=plgpu.GPUCompilerParams(
+            dimension_semantics=["parallel", "parallel", "sequential"],
+            max_concurrent_steps=2,
+        ),
+    )(a, b)
+    np.testing.assert_allclose(res, a @ b, rtol=1e-3)
 
 
 if __name__ == "__main__":
