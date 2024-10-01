@@ -6142,6 +6142,15 @@ class NumpyGradTests(jtu.JaxTestCase):
       tol = 3e-2
     check_grads(jnp.logaddexp2, args, 1, ["fwd", "rev"], tol, tol)
 
+  @jtu.sample_product(
+    n=range(-4, 5),
+    dtype=[jnp.float32, jnp.float64],
+  )
+  def testGradLdexp(self, n, dtype):
+    rng = jtu.rand_default(self.rng())
+    x = rng((), dtype)
+    check_grads(lambda x: jnp.ldexp(x, n), (x,), 1)
+
 
 class NumpySignaturesTest(jtu.JaxTestCase):
 
@@ -6381,14 +6390,13 @@ class NumpyDocTests(jtu.JaxTestCase):
     if jit:
       wrapped = jax.jit(wrapped)
 
-    wrapped = implements(orig, skip_params=['out'])(wrapped)
+    wrapped = implements(orig)(wrapped)
     doc = wrapped.__doc__
 
     self.assertStartsWith(doc, "Example Docstring")
     self.assertIn("Original docstring below", doc)
     self.assertIn("Parameters", doc)
     self.assertIn("Returns", doc)
-    self.assertNotIn('out', doc)
     self.assertNotIn('other_arg', doc)
     self.assertNotIn('versionadded', doc)
 

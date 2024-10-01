@@ -208,6 +208,42 @@ class OpsTest(PallasBaseTest):
         ),
     )
 
+  def test_select_with_scalar_condition(self):
+    def kernel(cond, lhs, rhs, out):
+      out[:] = jax.lax.select(cond[0] != 0, lhs[:], rhs[:])
+
+    def run(cond, lhs, rhs):
+      return pl.pallas_call(
+          kernel,
+          out_shape=lhs,
+          grid_spec=pltpu.PrefetchScalarGridSpec(
+              num_scalar_prefetch=0,
+              in_specs=[
+                  pl.BlockSpec(memory_space=pltpu.SMEM),
+                  pl.BlockSpec(memory_space=pltpu.VMEM),
+                  pl.BlockSpec(memory_space=pltpu.VMEM),
+              ],
+          ),
+          name="select_kernel",
+      )(cond, lhs, rhs)
+
+    cond = jnp.array([1], dtype=jnp.int32)
+    lhs = jnp.zeros((8, 128), dtype=jnp.float32)
+    rhs = jnp.ones((8, 128), dtype=jnp.float32)
+
+    assert (run(cond, lhs, rhs) == lhs).all()
+
+  def test_offset_oob(self):
+    # TODO(b/342235360): Remove this test once we have a better way to handle
+    #                    out-of-first-tile offsets.
+    def body(x_ref, o_ref):
+      o_ref[...] = x_ref[...][:, 130:230]
+
+    out = jax.ShapeDtypeStruct((8, 100), jnp.int16)
+    x = jnp.arange(8 * 256, dtype=jnp.int16).reshape((8, 256))
+    result = self.pallas_call(body, out_shape=out)(x)
+    np.testing.assert_array_equal(result, x[:, 130:230])
+
 
 class OpsInterpretTest(OpsTest):
   INTERPRET = True

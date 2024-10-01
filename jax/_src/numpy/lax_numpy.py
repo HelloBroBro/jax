@@ -1451,7 +1451,6 @@ def ediff1d(ary: ArrayLike, to_end: ArrayLike | None = None,
     result = concatenate((result, ravel(asarray(to_end, dtype=arr.dtype))))
   return result
 
-@util.implements(np.gradient, skip_params=['edge_order'])
 @partial(jit, static_argnames=("axis", "edge_order"))
 def gradient(
     f: ArrayLike,
@@ -1459,6 +1458,64 @@ def gradient(
     axis: int | Sequence[int] | None = None,
     edge_order: int | None = None,
 ) -> Array | list[Array]:
+  """Compute the numerical gradient of a sampled function.
+
+  JAX implementation of :func:`numpy.gradient`.
+
+  The gradient in ``jnp.gradient`` is computed using second-order finite
+  differences across the array of sampled function values. This should not
+  be confused with :func:`jax.grad`, which computes a precise gradient of
+  a callable function via :ref:`automatic differentiation <automatic-differentiation>`.
+
+  Args:
+    f: *N*-dimensional array of function values.
+    varargs: optional list of scalars or arrays specifying spacing of
+      function evaluations. Options are:
+
+      - not specified: unit spacing in all dimensions.
+      - a single scalar: constant spacing in all dimensions.
+      - *N* values: specify different spacing in each dimension:
+
+        - scalar values indicate constant spacing in that dimension.
+        - array values must match the length of the corresponding dimension,
+          and specify the coordinates at which ``f`` is evaluated.
+
+    edge_order: not implemented in JAX
+    axis: integer or tuple of integers specifying the axis along which
+      to compute the gradient. If None (default) calculates the gradient
+      along all axes.
+
+  Returns:
+    an array or tuple of arrays containing the numerical gradient along
+    each specified axis.
+
+  See also:
+    - :func:`jax.grad`: automatic differentiation of a function with a single output.
+
+  Examples:
+    Comparing numerical and automatic differentiation of a simple function:
+
+    >>> def f(x):
+    ...   return jnp.sin(x) * jnp.exp(-x / 4)
+    ...
+    >>> def gradf_exact(x):
+    ...   # exact analytical gradient of f(x)
+    ...   return -f(x) / 4 + jnp.cos(x) * jnp.exp(-x / 4)
+    ...
+    >>> x = jnp.linspace(0, 5, 10)
+
+    >>> with jnp.printoptions(precision=2, suppress=True):
+    ...   print("numerical gradient:", jnp.gradient(f(x), x))
+    ...   print("automatic gradient:", jax.vmap(jax.grad(f))(x))
+    ...   print("exact gradient:    ", gradf_exact(x))
+    ...
+    numerical gradient: [ 0.83  0.61  0.18 -0.2  -0.43 -0.49 -0.39 -0.21 -0.02  0.08]
+    automatic gradient: [ 1.    0.62  0.17 -0.23 -0.46 -0.51 -0.41 -0.21 -0.01  0.15]
+    exact gradient:     [ 1.    0.62  0.17 -0.23 -0.46 -0.51 -0.41 -0.21 -0.01  0.15]
+
+    Notice that, as expected, the numerical gradient has some approximation error
+    compared to the automatic gradient computed via :func:`jax.grad`.
+  """
 
   if edge_order is not None:
     raise NotImplementedError(
@@ -6635,10 +6692,48 @@ def repeat(a: ArrayLike, repeats: ArrayLike, axis: int | None = None, *,
   return take(a, gather_indices, axis=axis)
 
 
-@util.implements(getattr(np, "trapezoid", getattr(np, "trapz", None)))
 @partial(jit, static_argnames=('axis',))
 def trapezoid(y: ArrayLike, x: ArrayLike | None = None, dx: ArrayLike = 1.0,
               axis: int = -1) -> Array:
+  r"""
+  Integrate along the given axis using the composite trapezoidal rule.
+
+  JAX implementation of :func:`numpy.trapezoid`
+
+  The trapezoidal rule approximates the integral under a curve by summing the
+  areas of trapezoids formed between adjacent data points.
+
+  Args:
+    y: array of data to integrate.
+    x: optional array of sample points corresponding to the ``y`` values. If not
+       provided, ``x`` defaults to equally spaced with spacing given by ``dx``.
+    dx: The spacing between sample points when `x` is None (default: 1.0).
+    axis: The axis along which to integrate (default: -1)
+
+  Returns:
+    The definite integral approximated by the trapezoidal rule.
+
+  Examples:
+    Integrate over a regular grid, with spacing 1.0:
+
+    >>> y = jnp.array([1, 2, 3, 2, 3, 2, 1])
+    >>> jnp.trapezoid(y, dx=1.0)
+    Array(13., dtype=float32)
+
+    Integrate over an irregular grid:
+
+    >>> x = jnp.array([0, 2, 5, 7, 10, 15, 20])
+    >>> jnp.trapezoid(y, x)
+    Array(43., dtype=float32)
+
+    Approximate :math:`\int_0^{2\pi} \sin^2(x)dx`, which equals :math:`\pi`:
+
+    >>> x = jnp.linspace(0, 2 * jnp.pi, 1000)
+    >>> y = jnp.sin(x) ** 2
+    >>> result = jnp.trapezoid(y, x)
+    >>> jnp.allclose(result, jnp.pi)
+    Array(True, dtype=bool)
+  """
   # TODO(phawkins): remove this annotation after fixing jnp types.
   dx_array: Array
   if x is None:
