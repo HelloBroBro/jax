@@ -2425,6 +2425,17 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
 
   @jtu.sample_product(
+      n = [2, 3, 4],
+      k = [None, -1, 0, 1],
+      funcname = ['triu', 'tril']
+  )
+  def testMaskIndices(self, n, k, funcname):
+    kwds = {} if k is None else {'k': k}
+    jnp_result = jnp.mask_indices(n, getattr(jnp, funcname), **kwds)
+    np_result = np.mask_indices(n, getattr(np, funcname), **kwds)
+    self.assertArraysEqual(jnp_result, np_result, check_dtypes=False)
+
+  @jtu.sample_product(
     dtype=default_dtypes,
     a_shape=[(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (2, 3), (2, 2, 2), (2, 2, 2, 2)],
     val_shape=[(), (1,), (2,), (1, 2), (3, 2)],
@@ -4615,11 +4626,16 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       return x, i
 
     jnp_op = lambda x, i: jnp.take_along_axis(x, i, axis=axis)
+    jnp_one_hot_op = lambda x, i: jnp.take_along_axis(
+        x, i, axis=axis, mode='one_hot'
+    )
 
     if hasattr(np, "take_along_axis"):
       np_op = lambda x, i: np.take_along_axis(x, i, axis=axis)
       self._CheckAgainstNumpy(np_op, jnp_op, args_maker)
+      self._CheckAgainstNumpy(np_op, jnp_one_hot_op, args_maker)
     self._CompileAndCheck(jnp_op, args_maker)
+    self._CompileAndCheck(jnp_one_hot_op, args_maker)
 
   def testTakeAlongAxisWithUint8IndicesDoesNotOverflow(self):
     # https://github.com/jax-ml/jax/issues/5088

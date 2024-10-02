@@ -32,48 +32,47 @@ from functools import partial
 import importlib
 import math
 import operator
+import string
 import types
-from typing import (overload, Any, Literal, NamedTuple,
-                    Protocol, TypeVar, Union)
+from typing import ( Any, Literal, NamedTuple,
+                    Protocol, TypeVar, Union,overload)
 import warnings
 
-import numpy as np
-import opt_einsum
-
 import jax
-from jax import jit
 from jax import errors
+from jax import jit
 from jax import lax
-from jax.sharding import Sharding, SingleDeviceSharding
-from jax.tree_util import tree_leaves, tree_flatten, tree_map
-
 from jax._src import api_util
 from jax._src import config
 from jax._src import core
-from jax._src.custom_derivatives import custom_jvp
 from jax._src import deprecations
 from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import xla_bridge
 from jax._src.api_util import _ensure_index_tuple
 from jax._src.array import ArrayImpl
-from jax._src.core import ShapedArray, ConcreteArray
-from jax._src.lax.lax import (_array_copy, _sort_lt_comparator,
-                              _sort_le_comparator, PrecisionLike)
+from jax._src.core import ConcreteArray, ShapedArray
+from jax._src.custom_derivatives import custom_jvp
 from jax._src.lax import lax as lax_internal
+from jax._src.lax.lax import ( PrecisionLike,_array_copy,
+                              _sort_le_comparator, _sort_lt_comparator)
 from jax._src.lib import xla_client as xc
 from jax._src.numpy import reductions
 from jax._src.numpy import ufuncs
 from jax._src.numpy import util
 from jax._src.numpy.vectorize import vectorize
 from jax._src.typing import (
-  Array, ArrayLike, DeprecatedArg, DimSize, DuckTypedArray,
-  DType, DTypeLike, Shape, StaticScalar,
+  Array, ArrayLike,
+  DType, DTypeLike, DeprecatedArg, DimSize, DuckTypedArray, Shape, StaticScalar,
 )
-from jax._src.util import (unzip2, subvals, safe_zip,
-                           ceil_of_ratio, partition_list,
+from jax._src.util import (
+                           NumpyComplexWarning,
                            canonicalize_axis as _canonicalize_axis,
-                           NumpyComplexWarning)
+                           ceil_of_ratio, partition_list, safe_zip, subvals,unzip2)
+from jax.sharding import Sharding, SingleDeviceSharding
+from jax.tree_util import tree_flatten, tree_leaves, tree_map
+import numpy as np
+import opt_einsum
 
 for pkg_name in ['jax_cuda12_plugin', 'jax.jaxlib']:
   try:
@@ -6998,19 +6997,53 @@ def trace(a: ArrayLike, offset: int | ArrayLike = 0, axis1: int = 0, axis2: int 
   return reductions.sum(a, axis=(-2, -1), dtype=dtype)
 
 
-def _wrap_indices_function(f):
-  @util.implements(f, update_doc=False)
-  def wrapper(*args, **kwargs):
-    args = [core.concrete_or_error(
-              None, arg, f"argument {i} of jnp.{f.__name__}()")
-            for i, arg in enumerate(args)]
-    kwargs = {key: core.concrete_or_error(
-                None, val, f"argument '{key}' of jnp.{f.__name__}()")
-              for key, val in kwargs.items()}
-    return tuple(asarray(x) for x in f(*args, **kwargs))
-  return wrapper
+def mask_indices(n: int,
+                 mask_func: Callable[[ArrayLike, int], Array],
+                 k: int = 0, *, size: int | None = None) -> tuple[Array, Array]:
+  """Return indices of a mask of an (n, n) array.
 
-mask_indices = _wrap_indices_function(np.mask_indices)
+  Args:
+    n: static integer array dimension.
+    mask_func: a function that takes a shape ``(n, n)`` array and
+      an optional offset ``k``, and returns a shape ``(n, n)`` mask.
+      Examples of functions with this signature are
+      :func:`~jax.numpy.triu` and :func:`~jax.numpy.tril`.
+    k: a scalar value passed to ``mask_func``.
+    size: optional argument specifying the static size of the output arrays.
+      This is passed to :func:`~jax.numpy.nonzero` when generating the indices
+      from the mask.
+
+  Returns:
+    a tuple of indices where ``mask_func`` is nonzero.
+
+  See also:
+    - :func:`jax.numpy.triu_indices`: compute ``mask_indices`` for :func:`~jax.numpy.triu`.
+    - :func:`jax.numpy.tril_indices`: compute ``mask_indices`` for :func:`~jax.numpy.tril`.
+
+  Examples:
+    Calling ``mask_indices`` on built-in masking functions:
+
+    >>> jnp.mask_indices(3, jnp.triu)
+    (Array([0, 0, 0, 1, 1, 2], dtype=int32), Array([0, 1, 2, 1, 2, 2], dtype=int32))
+
+    >>> jnp.mask_indices(3, jnp.tril)
+    (Array([0, 1, 1, 2, 2, 2], dtype=int32), Array([0, 0, 1, 0, 1, 2], dtype=int32))
+
+    Calling ``mask_indices`` on a custom masking function:
+
+    >>> def mask_func(x, k=0):
+    ...   i = jnp.arange(x.shape[0])[:, None]
+    ...   j = jnp.arange(x.shape[1])
+    ...   return (i + 1) % (j + 1 + k) == 0
+    >>> mask_func(jnp.ones((3, 3)))
+    Array([[ True, False, False],
+           [ True,  True, False],
+           [ True, False,  True]], dtype=bool)
+    >>> jnp.mask_indices(3, mask_func)
+    (Array([0, 1, 1, 2, 2], dtype=int32), Array([0, 0, 1, 0, 2], dtype=int32))
+  """
+  i, j = nonzero(mask_func(ones((n, n)), k), size=size)
+  return (i, j)
 
 
 def _triu_size(n, m, k):
@@ -9855,11 +9888,64 @@ def rollaxis(a: ArrayLike, axis: int, start: int = 0) -> Array:
   return moveaxis(a, axis, start)
 
 
-@util.implements(np.packbits)
 @partial(jit, static_argnames=('axis', 'bitorder'))
-def packbits(
-    a: ArrayLike, axis: int | None = None, bitorder: str = "big"
-) -> Array:
+def packbits(a: ArrayLike, axis: int | None = None, bitorder: str = "big") -> Array:
+  """Pack array of bits into a uint8 array.
+
+  JAX implementation of :func:`numpy.packbits`
+
+  Args:
+    a: N-dimensional array of bits to pack.
+    axis: optional axis along which to pack bits. If not specified, ``a`` will
+      be flattened.
+    bitorder: ``"big"`` (default) or ``"little"``: specify whether the bit order
+      is big-endian or little-endian.
+
+  Returns:
+    A uint8 array of packed values.
+
+  See also:
+    - :func:`jax.numpy.unpackbits`: inverse of ``packbits``.
+
+  Examples:
+    Packing bits in one dimension:
+
+    >>> bits = jnp.array([0, 0, 0, 0, 0, 1, 1, 1])
+    >>> jnp.packbits(bits)
+    Array([7], dtype=uint8)
+    >>> 0b00000111  # equivalent bit-wise representation:
+    7
+
+    Optionally specifying little-endian convention:
+
+    >>> jnp.packbits(bits, bitorder="little")
+    Array([224], dtype=uint8)
+    >>> 0b11100000  # equivalent bit-wise representation
+    224
+
+    If the number of bits is not a multiple of 8, it will be right-padded
+    with zeros:
+
+    >>> jnp.packbits(jnp.array([1, 0, 1]))
+    Array([160], dtype=uint8)
+    >>> jnp.packbits(jnp.array([1, 0, 1, 0, 0, 0, 0, 0]))
+    Array([160], dtype=uint8)
+
+    For a multi-dimensional input, bits may be packed along a specified axis:
+
+    >>> a = jnp.array([[1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0],
+    ...                [0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1]])
+    >>> vals = jnp.packbits(a, axis=1)
+    >>> vals
+    Array([[212, 150],
+           [ 69, 207]], dtype=uint8)
+
+    The inverse of ``packbits`` is provided by :func:`~jax.numpy.unpackbits`:
+
+    >>> jnp.unpackbits(vals, axis=1)
+    Array([[1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0],
+           [0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1]], dtype=uint8)
+  """
   util.check_arraylike("packbits", a)
   arr = asarray(a)
   if not (issubdtype(arr.dtype, integer) or issubdtype(arr.dtype, bool_)):
@@ -9886,7 +9972,6 @@ def packbits(
   return swapaxes(packed, axis, -1)
 
 
-@util.implements(np.unpackbits)
 @partial(jit, static_argnames=('axis', 'count', 'bitorder'))
 def unpackbits(
     a: ArrayLike,
@@ -9894,6 +9979,67 @@ def unpackbits(
     count: int | None = None,
     bitorder: str = "big",
 ) -> Array:
+  """Unpack the bits in a uint8 array.
+
+  JAX implementation of :func:`numpy.unpackbits`.
+
+  Args:
+    a: N-dimensional array of type ``uint8``.
+    axis: optional axis along which to unpack. If not specified, ``a`` will
+      be flattened
+    count: specify the number of bits to unpack (if positive) or the number
+      of bits to trim from the end (if negative).
+    bitorder: ``"big"`` (default) or ``"little"``: specify whether the bit order
+      is big-endian or little-endian.
+
+  Returns:
+    a uint8 array of unpacked bits.
+
+  See also:
+    - :func:`jax.numpy.packbits`: this inverse of ``unpackbits``.
+
+  Examples:
+    Unpacking bits from a scalar:
+
+    >>> jnp.unpackbits(jnp.uint8(27))  # big-endian by default
+    Array([0, 0, 0, 1, 1, 0, 1, 1], dtype=uint8)
+    >>> jnp.unpackbits(jnp.uint8(27), bitorder="little")
+    Array([1, 1, 0, 1, 1, 0, 0, 0], dtype=uint8)
+
+    Compare this to the Python binary representation:
+
+    >>> 0b00011011
+    27
+
+    Unpacking bits along an axis:
+
+    >>> vals = jnp.array([[154],
+    ...                   [ 49]], dtype='uint8')
+    >>> bits = jnp.unpackbits(vals, axis=1)
+    >>> bits
+    Array([[1, 0, 0, 1, 1, 0, 1, 0],
+           [0, 0, 1, 1, 0, 0, 0, 1]], dtype=uint8)
+
+    Using :func:`~jax.numpy.packbits` to invert this:
+
+    >>> jnp.packbits(bits, axis=1)
+    Array([[154],
+           [ 49]], dtype=uint8)
+
+    The ``count`` keyword lets ``unpackbits`` serve as an inverse of ``packbits``
+    in cases where not all bits are present:
+
+    >>> bits = jnp.array([1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1])  # 11 bits
+    >>> vals = jnp.packbits(bits)
+    >>> vals
+    Array([219,  96], dtype=uint8)
+    >>> jnp.unpackbits(vals)  # 16 zero-padded bits
+    Array([1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0], dtype=uint8)
+    >>> jnp.unpackbits(vals, count=11)  # specify 11 output bits
+    Array([1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1], dtype=uint8)
+    >>> jnp.unpackbits(vals, count=-5)  # specify 5 bits to be trimmed
+    Array([1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1], dtype=uint8)
+  """
   util.check_arraylike("unpackbits", a)
   arr = asarray(a)
   if _dtype(a) != uint8:
@@ -10186,6 +10332,26 @@ def take_along_axis(
   out_shape = lax.broadcast_shapes(idx_shape, arr_shape)
   if axis_size == 0:
     return zeros(out_shape, a.dtype)
+
+  if mode == "one_hot":
+    indices = _normalize_index(indices, axis_size)
+    hot = jax.nn.one_hot(indices, axis_size, dtype=bool_)
+    if a.ndim == 1:
+      return einsum("...b,b->...", hot, a, preferred_element_type=a.dtype)
+    if axis_int > len(string.ascii_letters) - 2:
+      raise ValueError(
+          "One Hot indexing is only supported for up to 50 leading dimensions."
+      )
+    labels = "".join([string.ascii_letters[i] for i in range(axis_int)])
+    eq = labels + "y...z," + labels + "z...->" + labels + "y..."
+    return einsum(
+        eq,
+        hot,
+        a,
+        precision=lax.Precision.HIGHEST,
+        preferred_element_type=a.dtype,
+    )
+
   index_dims = [i for i, idx in enumerate(idx_shape) if i == axis_int or not core.definitely_equal(idx, 1)]
 
   gather_index_shape = tuple(np.array(out_shape)[index_dims]) + (1,)

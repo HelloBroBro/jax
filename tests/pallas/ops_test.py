@@ -561,14 +561,6 @@ class OpsTest(PallasBaseTest):
       self.skipTest("Not supported: bad canonicalization")
     if from_dtype == "bool" and to_dtype in {"int16", "int8"}:
       self.skipTest("Not supported: cannot extend to sub-32 bit types")
-    if from_dtype in {"bfloat16", "float32"} and to_dtype == "bool":
-      self.skipTest("Not supported: unsupported relayout")
-    if from_dtype == "bool" and to_dtype in {"int32", "bfloat16", "float32"}:
-      self.skipTest("Not supported: unsupported relayout")
-    if from_dtype in {"int16", "int8"} and to_dtype == "bool":
-      self.skipTest("Not supported: cannot truncate from sub-32 bit types")
-    if from_dtype in {"int16", "int8"} and to_dtype == "bool":
-      self.skipTest("Not supported: cannot truncate from sub-32 bit types")
     if jtu.test_device_matches(["gpu"]):
       if (from_dtype in {"bfloat16", "float32"} and
           to_dtype in {"int8", "int16", "int32"}):
@@ -784,7 +776,7 @@ class OpsTest(PallasBaseTest):
     if jtu.test_device_matches(["tpu"]) and fn in (
         jnp.acos, jnp.acosh, jnp.asin, jnp.asinh, jnp.atan, jnp.atanh,
         jnp.cbrt, jnp.ceil, jnp.cosh, lax.clz, jnp.expm1,
-        jnp.floor, lax.population_count, jnp.sinh, jnp.tan,
+        jnp.floor, lax.population_count, jnp.sinh,
     ):
       self.skipTest(f"{fn.__name__} not implemented on TPU")
 
