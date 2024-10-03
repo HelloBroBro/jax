@@ -404,13 +404,15 @@ class PallasCallTest(PallasTest):
         pl.pallas_call,
         in_specs=[spec],
         out_specs=spec,
-        out_shape=jax.ShapeDtypeStruct((128, 64), jnp.float16),
+        out_shape=jax.ShapeDtypeStruct((128, 128), jnp.float16),
         grid=(2, 2),
     )
     def kernel(x_ref, o_ref):
       assert x_ref.shape == (128, 64), x_ref.shape
+      o_ref[...] = x_ref[...]
 
-    kernel.lower(jax.ShapeDtypeStruct((256, 128), jnp.float16))
+    x = jnp.arange(128 * 128).astype(jnp.float16).reshape(128, 128)
+    np.testing.assert_array_equal(kernel(x), x)
 
   def test_fori_loop_array(self):
     @functools.partial(
@@ -536,14 +538,10 @@ class PallasCallTest(PallasTest):
       assert o_ref.shape == acc_ref.shape == (tile_m, tile_n)
       plgpu.wgmma(acc_ref, a_ref, b_ref)
       plgpu.wgmma_wait(0)  # TODO(apaszke): Delay the pipeline to avoid memory races
-      # TODO(apaszke): Only store in the last step. It doesn't work because we
-      # don't have partial discharge for control flow.
-      # is_last_step = pl.program_id(2) == grid_k - 1
-      # @pl.when(is_last_step)
-      # def _epilogue():
-      # pl.debug_print("{}", acc_ref[...])
-      # TODO(apaszke): This is an untiled store! It's slow!!
-      o_ref[...] = acc_ref[...]
+      is_last_step = pl.program_id(2) == grid_k - 1
+      @pl.when(is_last_step)
+      def _epilogue():
+        o_ref[...] = acc_ref[...].astype(dtype)
 
     key1, key2 = jax.random.split(jax.random.key(42), 2)
     a = jax.random.uniform(key1, shape=(m, k), dtype=dtype)
@@ -565,8 +563,13 @@ class PallasCallTest(PallasTest):
                 swizzle=128,
             ),
         ],
-        out_specs=plgpu.GPUBlockSpec((tile_m, tile_n), lambda m, n, k: (m, n)),
-        out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+        out_specs=plgpu.GPUBlockSpec(
+            (tile_m, tile_n),
+            lambda m, n, k: (m, n),
+            transforms=plgpu.TilingTransform((64, elems_128b)),
+            swizzle=128,
+        ),
+        out_shape=jax.ShapeDtypeStruct((m, n), jnp.float16),
         scratch_shapes=[plgpu.ACC((tile_m, tile_n), jnp.float32)],
         grid=(grid_m, grid_n, grid_k),
         compiler_params=plgpu.GPUCompilerParams(
@@ -575,6 +578,28 @@ class PallasCallTest(PallasTest):
         ),
     )(a, b)
     np.testing.assert_allclose(res, a @ b, rtol=1e-3)
+
+  def test_slicing(self):
+    left = upper = slice(None, 64)
+    right = lower = slice(64, None)
+    # We rotate the four quadrants of the input clockwise.
+    def rotate(src, dst):
+      dst[upper, left] = src[lower, left]
+      dst[upper, right] = src[upper, left]
+      dst[lower, right] = src[upper, right]
+      dst[lower, left] = src[lower, right]
+
+    x = jnp.arange(128 * 128).astype(jnp.float16).reshape(128, 128)
+    spec = plgpu.GPUBlockSpec(
+        (128, 128),
+        lambda: (0, 0),
+        transforms=plgpu.TilingTransform((64, 64)),
+        swizzle=128,
+    )
+    f = pl.pallas_call(rotate, out_shape=x, in_specs=[spec], out_specs=spec)
+    expected = np.empty_like(x)
+    rotate(x, expected)
+    np.testing.assert_array_equal(f(x), expected)
 
 
 if __name__ == "__main__":
