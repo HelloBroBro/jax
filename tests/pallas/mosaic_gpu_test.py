@@ -43,16 +43,22 @@ class PallasTest(jtu.JaxTestCase):
 
 class PallasCallTest(PallasTest):
 
-  def test_add_one(self):
+  @parameterized.named_parameters(
+      ("add_one", lambda x:  x + 1.),
+      ("logistic", jax.lax.logistic),
+      ("square", lambda x: x ** 2),
+      ("rsqrt", jax.lax.rsqrt),
+  )
+  def test_unary_ops(self, unary):
     @functools.partial(
         pl.pallas_call,
         out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
     )
     def kernel(x_ref, o_ref):
-      o_ref[...] = x_ref[...] + 1.0
+      o_ref[...] = unary(x_ref[...])
 
     x = jnp.arange(256).astype(jnp.float32)
-    np.testing.assert_array_equal(kernel(x), x + 1.0)
+    np.testing.assert_array_equal(kernel(x), unary(x))
 
   def test_add_xy(self):
     @functools.partial(
@@ -164,37 +170,59 @@ class PallasCallTest(PallasTest):
     # are never written to.
     np.testing.assert_array_equal(kernel(x)[:, :16], y[:, :16])
 
-  def test_add_one_with_async_copy_smem_to_gmem(self):
+  @parameterized.product(indexer=[..., slice(128), slice(None, 128)])
+  def test_copy_smem_to_gmem(self, indexer):
     @functools.partial(
         pl.pallas_call,
-        out_shape=jax.ShapeDtypeStruct([128], jnp.float32),
+        out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
         out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
-        scratch_shapes=[plgpu.SMEM((128,), jnp.float32)],
+        scratch_shapes=[plgpu.SMEM((256,), jnp.float32)],
     )
     def kernel(x_ref, o_ref_gmem, scratch_ref):
       scratch_ref[...] = x_ref[...] + 1
-      plgpu.async_copy_smem_to_gmem(scratch_ref, o_ref_gmem)
+      plgpu.copy_smem_to_gmem(scratch_ref.at[indexer], o_ref_gmem.at[indexer])
       plgpu.wait_smem_to_gmem(0)
 
-    x = jnp.arange(128).astype(jnp.float32)
-    np.testing.assert_array_equal(kernel(x), x + 1.0)
+    x = jnp.arange(256).astype(jnp.float32)
+    np.testing.assert_array_equal(kernel(x)[indexer], x[indexer] + 1.0)
 
-  def test_add_one_with_async_copy_gmem_to_smem(self):
+  @parameterized.product(indexer=[..., slice(128), slice(None, 128)])
+  def test_copy_gmem_to_smem(self, indexer):
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
+        in_specs=(pl.BlockSpec(memory_space=plgpu.GMEM),),
+        scratch_shapes=[
+            plgpu.SMEM((256,), jnp.float32),
+            plgpu.Barrier(num_arrivals=1),
+        ],
+    )
+    def kernel(x_ref_gmem, o_ref, scratch_ref, barrier_ref):
+      plgpu.copy_gmem_to_smem(
+          x_ref_gmem.at[indexer], scratch_ref.at[indexer], barrier=barrier_ref
+      )
+      plgpu.wait_barrier(barrier_ref)
+      o_ref[...] = scratch_ref[...] + 1
 
+    x = jnp.arange(256).astype(jnp.float32)
+    np.testing.assert_array_equal(kernel(x)[indexer], x[indexer] + 1.0)
+
+  @parameterized.product(indexer=[0, 1, 2, 3])
+  def test_copy_gmem_to_smem_with_indexed_barrier(self, indexer):
     @functools.partial(
         pl.pallas_call,
         out_shape=jax.ShapeDtypeStruct([128], jnp.float32),
         in_specs=(pl.BlockSpec(memory_space=plgpu.GMEM),),
         scratch_shapes=[
             plgpu.SMEM((128,), jnp.float32),
-            plgpu.Barrier(num_arrivals=1),
+            plgpu.Barrier(num_arrivals=1, num_barriers=4),
         ],
     )
     def kernel(x_ref_gmem, o_ref, scratch_ref, barrier_ref):
-      plgpu.async_copy_gmem_to_smem(
-          x_ref_gmem, scratch_ref, barrier=barrier_ref
+      plgpu.copy_gmem_to_smem(
+          x_ref_gmem, scratch_ref, barrier=barrier_ref.at[indexer]
       )
-      plgpu.wait_barrier(barrier_ref)
+      plgpu.wait_barrier(barrier_ref.at[indexer])
       o_ref[...] = scratch_ref[...] + 1
 
     x = jnp.arange(128).astype(jnp.float32)
