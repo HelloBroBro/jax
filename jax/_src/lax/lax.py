@@ -60,8 +60,6 @@ from jax._src.lax import slicing
 from jax._src.lax.utils import (
   _input_dtype, dtype_to_string, standard_abstract_eval,
   standard_multi_result_abstract_eval, standard_primitive)
-from jax._src import xla_bridge
-from jax._src.lib import xla_client
 from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import chlo
@@ -71,11 +69,6 @@ from jax._src.sharding_impls import (PmapSharding, NamedSharding,
 from jax._src.typing import Array, ArrayLike, DimSize, DuckTypedArray, DTypeLike, Shape
 from jax._src.util import (cache, safe_zip, safe_map, canonicalize_axis,
                            split_list, NumpyComplexWarning)
-
-xb = xla_bridge
-xc = xla_client
-xops = xla_client.ops
-xe = xla_client._xla
 
 _max = builtins.max
 _min = builtins.min
@@ -3220,6 +3213,46 @@ def _dot_general_shape_computation(lhs_shape, rhs_shape, dimension_numbers):
   rhs_tensored_shape = tuple_delete(rhs_shape, rhs_contract_or_batch)
   return batch_shape + lhs_tensored_shape + rhs_tensored_shape
 
+
+def _check_specs_match(lhs_spec, rhs_spec, msg):
+  for l, r in zip(lhs_spec, rhs_spec):
+    if l is not None and r is not None and l != r:
+      raise TypeError(msg)
+
+def _dot_general_sharding_rule(lhs, rhs, *, dimension_numbers, precision,
+                               preferred_element_type: DTypeLike | None):
+  if lhs.sharding.mesh != rhs.sharding.mesh:
+    raise ValueError(
+        'Mesh of both lhs and rhs should match. Got lhs:'
+        f' {lhs.sharding.mesh} and rhs: {rhs.sharding.mesh}')
+
+  (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
+  lhs_batch_spec = tuple(lhs.sharding.spec[i] for i in lhs_batch)
+  rhs_batch_spec = tuple(rhs.sharding.spec[i] for i in rhs_batch)
+  msg = ("dot_general requires lhs batch dimensions and rhs batch dimensions "
+         f"to have the consistent sharding, got {lhs_batch_spec} and "
+         f"{rhs_batch_spec}.")
+  _check_specs_match(lhs_batch_spec, rhs_batch_spec, msg)
+
+  lhs_contracting_spec = tuple(lhs.sharding.spec[i] for i in lhs_contracting)
+  rhs_contracting_spec = tuple(rhs.sharding.spec[i] for i in rhs_contracting)
+  msg = ("dot_general requires contracting dimensions to have consistent "
+         f"sharding, got {lhs_contracting_spec} and {rhs_contracting_spec}.")
+  _check_specs_match(lhs_contracting_spec, rhs_contracting_spec, msg)
+
+  return _dot_general_sharding_computation(
+      lhs.sharding.spec, rhs.sharding.spec, dimension_numbers, lhs.sharding.mesh)
+
+def _dot_general_sharding_computation(lhs_spec, rhs_spec,
+                                      dimension_numbers, mesh):
+  (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
+  batch_spec = tuple(lhs_spec[i] for i in lhs_batch)
+  lhs_contract_or_batch = tuple(sorted(tuple(lhs_contracting) + tuple(lhs_batch)))
+  lhs_tensored_spec = tuple_delete(lhs_spec, lhs_contract_or_batch)
+  rhs_contract_or_batch = tuple(sorted(tuple(rhs_contracting) + tuple(rhs_batch)))
+  rhs_tensored_spec = tuple_delete(rhs_spec, rhs_contract_or_batch)
+  return NamedSharding(mesh, P(*(batch_spec + lhs_tensored_spec + rhs_tensored_spec)))
+
 def tuple_delete(tup, idx):
   idx_ = set(idx)
   return tuple(tup[i] for i in range(len(tup)) if i not in idx_)
@@ -3426,8 +3459,9 @@ def _dot_general_pp_rule(eqn, context, settings) -> pp.Doc:
       (list(lhs_cont), list(rhs_cont)), (list(lhs_batch), list(rhs_batch)))
   return core._pp_eqn(eqn.replace(params=printed_params), context, settings)
 
-dot_general_p = standard_primitive(_dot_general_shape_rule,
-                                   _dot_general_dtype_rule, 'dot_general')
+dot_general_p = standard_primitive(
+    _dot_general_shape_rule, _dot_general_dtype_rule, 'dot_general',
+    sharding_rule=_dot_general_sharding_rule)
 
 
 def _dot_general_batch_unpack_args(batch_args):
@@ -4747,6 +4781,12 @@ def _reduce_number_dtype_rule(name, operand, *args, **kw):
 def _reduce_sum_shape_rule(operand, *, axes):
   return _reduce_op_shape_rule(operand, axes=axes)
 
+def _reduce_sum_sharding_rule(operand, *, axes):
+  axes = frozenset(axes)
+  new_spec = P(*tuple(s for i, s in enumerate(operand.sharding.spec)
+                      if i not in axes))
+  return NamedSharding(operand.sharding.mesh, new_spec)
+
 def _reduce_sum_transpose_rule(cotangent, operand, *, axes):
   assert ad.is_undefined_primal(operand)
   input_shape = operand.aval.shape
@@ -4772,7 +4812,7 @@ def _replace_masked_values(x, val, padded_axes):
 
 reduce_sum_p = standard_primitive(
   _reduce_sum_shape_rule, partial(_reduce_number_dtype_rule, 'reduce_sum'),
-  'reduce_sum')
+  'reduce_sum', sharding_rule=_reduce_sum_sharding_rule)
 ad.deflinear2(reduce_sum_p, _reduce_sum_transpose_rule)
 batching.defreducer(reduce_sum_p, _get_sum_identity)
 pe.padding_rules[reduce_sum_p] = partial(_reducer_padding, _reduce_sum,
@@ -5399,7 +5439,20 @@ def _rng_bit_generator_weak_type_rule(key, *, shape, dtype, algorithm):
   del shape, dtype, algorithm
   return (key.weak_type, False)
 
-RandomAlgorithm = xops.RandomAlgorithm
+
+class RandomAlgorithm(enum.IntEnum):
+  """Describes which PRNG algorithm to use for rng_bit_generator."""
+
+  RNG_DEFAULT = 0
+  "The platform's default algorithm."
+
+  RNG_THREE_FRY = 1
+  "The Threefry-2x32 PRNG algorithm."
+
+  RNG_PHILOX = 2
+  "The Philox-4x32 PRNG algorithm."
+
+
 RandomAlgorithm.__str__ = lambda algorithm: algorithm.name  # type: ignore[method-assign]
 
 def _rng_algorithm(algorithm: RandomAlgorithm):
@@ -5422,7 +5475,7 @@ def _rng_bit_generator_lowering(
   # need to convert u32[4] -> u64[2] here in the translation rule. However, we
   # also polymorphically allow a u64[2] for backward compatibility.
   #
-  # Separately, xops.RngBitGenerator doesn't support generating u8 or
+  # Separately, RngBitGenerator doesn't support generating u8 or
   # u16, so we request u32 and truncate in that case.
   u32_type = ir.IntegerType.get_unsigned(32)
   u64_type = ir.IntegerType.get_unsigned(64)

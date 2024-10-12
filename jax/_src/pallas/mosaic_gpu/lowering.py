@@ -64,9 +64,13 @@ SMEM = gpu_core.SMEM
 @dataclasses.dataclass(kw_only=True, frozen=True)
 class Resources:
   smem_scratch_bytes: int
-  barriers: collections.Counter[mgpu.Barrier] = dataclasses.field(
+  barrier_counts: collections.Counter[mgpu.Barrier] = dataclasses.field(
       default_factory=collections.Counter
   )
+
+  @property
+  def barriers(self) -> Sequence[mgpu.Barrier]:
+    return list(self.barrier_counts.elements())
 
   def __add__(self, other: Resources) -> Resources:
     # TODO(slebedev): Optimize this.
@@ -75,7 +79,7 @@ class Resources:
     # we will allocate two barriers, even though one would be enough.
     return Resources(
         smem_scratch_bytes=self.smem_scratch_bytes + other.smem_scratch_bytes,
-        barriers=self.barriers + other.barriers,
+        barrier_counts=self.barrier_counts + other.barrier_counts,
     )
 
   def __or__(self, other: Resources) -> Resources:
@@ -83,7 +87,7 @@ class Resources:
         smem_scratch_bytes=max(
             self.smem_scratch_bytes, other.smem_scratch_bytes
         ),
-        barriers=self.barriers | other.barriers,
+        barrier_counts=self.barrier_counts | other.barrier_counts,
     )
 
 
@@ -145,7 +149,7 @@ def _run_scoped_resource_estimator(*consts, jaxpr: jax_core.Jaxpr) -> int:
       smem_scratch_bytes += math.prod(aval.shape) * aval.dtype.itemsize
   rs = Resources(
       smem_scratch_bytes=smem_scratch_bytes,
-      barriers=collections.Counter(barriers),
+      barrier_counts=collections.Counter(barriers),
   )
   return rs + _estimate_resources(jaxpr)
 
@@ -280,6 +284,41 @@ def _uses_arguments(cjaxpr: jax_core.ClosedJaxpr) -> list[bool]:
   return pe.dce_jaxpr(jaxpr, used_outputs=[True] * len(jaxpr.outvars))[1]
 
 
+def _check_block_mappings(
+    block_mappings: Sequence[pallas_core.BlockMapping],
+    name_and_src_info: pallas_core.NameAndSrcInfo,
+) -> None:
+  def err_details(bm: pallas_core.BlockMapping) -> str:
+    return (
+        f"Block spec for {bm.origin} in pallas_call {name_and_src_info}"
+        f" has block shape {bm.block_shape}, array shape"
+        f" {bm.array_shape_dtype.shape},"
+        # TODO(necula): add index_map source location info
+        f" and index_map {bm.index_map_jaxpr.jaxpr} in"
+        f" memory space {bm.transformed_block_aval.memory_space}."
+        " See details at"
+        " https://jax.readthedocs.io/en/latest/pallas/grid_blockspec.html#pallas-blockspec."
+    )
+
+  for bm in block_mappings:
+    if (
+        bm.transformed_block_aval.memory_space == gpu_core.GMEM
+        and not bm.has_trivial_window()
+    ):
+      raise NotImplementedError(
+          "Mosaic GPU lowering currently requires blocks in GMEM memory space "
+          "to have same block shape as the array shape "
+          "and a trivial index_map (returning all 0s).\n\n"
+          + err_details(bm)
+      )
+
+    if not isinstance(bm.indexing_mode, pallas_core.Blocked):
+      raise NotImplementedError(
+          "Only Blocked indexing mode is supported in Mosaic GPU lowering.\n\n"
+          + err_details(bm)
+      )
+
+
 def lower_jaxpr_to_module(
     grid_mapping: pallas_core.GridMapping,
     jaxpr: jax_core.Jaxpr,
@@ -288,8 +327,6 @@ def lower_jaxpr_to_module(
     cost_estimate: pallas_core.CostEstimate | None,
 ) -> LoweringResult:
   del cost_estimate  # Unused.
-
-  block_mappings = grid_mapping.block_mappings
 
   assert len(jaxpr.outvars) == 0
   assert not grid_mapping.vmapped_dims
@@ -305,12 +342,9 @@ def lower_jaxpr_to_module(
     raise NotImplementedError(
         "Scalar prefetch not supported in Mosaic GPU lowering."
     )
-  if not all(
-      isinstance(bm.indexing_mode, pallas_core.Blocked) for bm in block_mappings
-  ):
-    raise NotImplementedError(
-        "Only Blocked indexing mode is supported in Mosaic GPU lowering."
-    )
+
+  block_mappings = grid_mapping.block_mappings
+  _check_block_mappings(block_mappings, name_and_src_info)
 
   block = (128, 1, 1)
   params = compiler_params.get("mosaic_gpu", {})
@@ -440,9 +474,7 @@ def lower_jaxpr_to_module(
       return [step if pid is None else pid for pid in program_ids_template]
 
     grouped_barriers = collections.defaultdict(list)
-    for barrier, barrier_ref in zip(
-        sorted(rs.barriers.elements()), runtime_barriers
-    ):
+    for barrier, barrier_ref in zip(rs.barriers, runtime_barriers):
       grouped_barriers[barrier].append(barrier_ref)
     module_ctx = ModuleContext(
         name_and_src_info.name,
@@ -726,7 +758,7 @@ def lower_jaxpr_to_module(
           *extra_smem_scratch,
           (
               mgpu.Barrier(arrival_count=1, num_barriers=max_concurrent_steps),
-              [*sorted(rs.barriers.elements())],
+              rs.barriers,
               extra_barriers,
           ),
       ),
@@ -843,12 +875,19 @@ def _handle_indexing(
 def _ndindexer_indices(indexer: indexing.NDIndexer) -> tuple[gpu_core.Index, ...]:
   indices = []
   for idx in indexer.indices:
-    if isinstance(idx, indexing.Slice):
-      if idx.is_dynamic_start or idx.is_dynamic_size:
-        raise NotImplementedError(f"Unsupported slice: {idx}")
-      indices.append(slice(idx.start, idx.start + idx.size, idx.stride))
-    else:
+    if not isinstance(idx, indexing.Slice):
       indices.append(_as_index(idx))
+    elif not idx.is_dynamic_start and not idx.is_dynamic_size:
+      indices.append(slice(idx.start, idx.start + idx.size, idx.stride))
+    elif idx.stride == 1:
+      indices.append(
+          mgpu.DynamicSlice(
+              _as_index(idx.start) if idx.is_dynamic_start else idx.start,
+              _as_index(idx.size) if idx.is_dynamic_size else idx.size,
+          )
+      )
+    else:
+      raise NotImplementedError(f"Unsupported slice: {idx}")
   return tuple(indices)
 
 

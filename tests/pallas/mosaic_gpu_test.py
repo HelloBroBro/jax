@@ -468,8 +468,10 @@ class PallasCallTest(PallasTest):
     spec = plgpu.GPUBlockSpec(
         (128, 64),
         lambda *i: i,
-        transforms=plgpu.TilingTransform((64, 64)),
-        swizzle=128,
+        transforms=(
+            plgpu.TilingTransform((64, 64)),
+            plgpu.SwizzleTransform(128),
+        ),
     )
     @functools.partial(
         pl.pallas_call,
@@ -576,14 +578,15 @@ class PallasCallTest(PallasTest):
             plgpu.GPUBlockSpec(
                 (64, 128),
                 lambda i, j: (i, j),
-                transforms=plgpu.TilingTransform((64, elems_128b)),
-                swizzle=128,
+                transforms=(
+                    plgpu.TilingTransform((64, elems_128b)),
+                    plgpu.SwizzleTransform(128),
+                ),
             ),
             plgpu.GPUBlockSpec(
                 (128, 128),
                 lambda *i: i,
-                transforms=rhs_transforms,
-                swizzle=128,
+                transforms=(*rhs_transforms, plgpu.SwizzleTransform(128)),
             ),
         ],
         out_specs=plgpu.GPUBlockSpec((64, 128), lambda *i: i),
@@ -613,14 +616,18 @@ class PallasCallTest(PallasTest):
             plgpu.GPUBlockSpec(
                 (64, 128),
                 lambda i, j: (i, j),
-                transforms=plgpu.TilingTransform((64, elems_128b)),
-                swizzle=128,
+                transforms=(
+                    plgpu.TilingTransform((64, elems_128b)),
+                    plgpu.SwizzleTransform(128),
+                ),
             ),
             plgpu.GPUBlockSpec(
                 (128, 128),
                 lambda *i: i,
-                transforms=plgpu.TilingTransform((elems_128b, elems_128b)),
-                swizzle=128,
+                transforms=(
+                    plgpu.TilingTransform((elems_128b, elems_128b)),
+                    plgpu.SwizzleTransform(128),
+                ),
             ),
         ],
         out_specs=plgpu.GPUBlockSpec((64, 128), lambda *i: i),
@@ -675,21 +682,27 @@ class PallasCallTest(PallasTest):
             plgpu.GPUBlockSpec(
                 (tile_m, tile_k),
                 lambda m, n, k: (m, k),
-                transforms=plgpu.TilingTransform((64, elems_128b)),
-                swizzle=128,
+                transforms=(
+                    plgpu.TilingTransform((64, elems_128b)),
+                    plgpu.SwizzleTransform(128),
+                ),
             ),
             plgpu.GPUBlockSpec(
                 (tile_k, tile_n),
                 lambda m, n, k: (k, n),
-                transforms=plgpu.TilingTransform((elems_128b, elems_128b)),
-                swizzle=128,
+                transforms=(
+                    plgpu.TilingTransform((elems_128b, elems_128b)),
+                    plgpu.SwizzleTransform(128),
+                ),
             ),
         ],
         out_specs=plgpu.GPUBlockSpec(
             (tile_m, tile_n),
             lambda m, n, k: (m, n),
-            transforms=plgpu.TilingTransform((64, elems_128b)),
-            swizzle=128,
+            transforms=(
+                plgpu.TilingTransform((64, elems_128b)),
+                plgpu.SwizzleTransform(128),
+            ),
         ),
         out_shape=jax.ShapeDtypeStruct((m, n), jnp.float16),
         scratch_shapes=[plgpu.ACC((tile_m, tile_n), jnp.float32)],
@@ -716,13 +729,81 @@ class PallasCallTest(PallasTest):
     spec = plgpu.GPUBlockSpec(
         (128, 128),
         lambda: (0, 0),
-        transforms=plgpu.TilingTransform((64, 64)),
-        swizzle=128,
+        transforms=(
+            plgpu.TilingTransform((64, 64)),
+            plgpu.SwizzleTransform(128),
+        ),
     )
     f = pl.pallas_call(rotate, out_shape=x, in_specs=[spec], out_specs=spec)
     expected = np.empty_like(x)
     rotate(x, expected)
     np.testing.assert_array_equal(f(x), expected)
+
+
+class PipelineTest(PallasTest):
+
+  def test_manual(self, max_concurrent_steps=2, num_steps=4):
+
+    def kernel(x_gmem, o_gmem):
+      return pl.run_scoped(
+          functools.partial(scoped_kernel, x_gmem, o_gmem),
+          plgpu.SMEM((max_concurrent_steps, 32, 16), jnp.float32),
+          plgpu.SMEM((max_concurrent_steps, 32, 16), jnp.float32),
+          plgpu.Barrier(1, num_barriers=max_concurrent_steps),
+      )
+
+    def scoped_kernel(x_gmem, o_gmem, x_smem, o_smem, barrier):
+      gmem_slice = pl.ds(pl.program_id(0) * 32, 32)
+
+      def body(step, _):
+        slot = step % max_concurrent_steps
+
+        # Wait for the current GMEM->SMEM copy to complete.
+        plgpu.wait_barrier(barrier.at[slot])
+        # Wait for the previous output SMEM->GMEM copy to complete.
+        plgpu.wait_smem_to_gmem(max_concurrent_steps - 1)
+
+        o_smem[...] = x_smem[...] + 1.0
+
+        plgpu.copy_smem_to_gmem(
+            o_smem.at[slot], o_gmem.at[gmem_slice, pl.ds(step * 16, 16)]
+        )
+
+        fetch_step = step + max_concurrent_steps
+        fetch_slot = slot  # (x + y) % y == x % y
+        jax.lax.cond(
+            fetch_step < num_steps,
+            lambda: plgpu.copy_gmem_to_smem(
+                x_gmem.at[gmem_slice, pl.ds(fetch_step * 16, 16)],
+                x_smem.at[fetch_slot],
+                barrier=barrier.at[fetch_slot],
+            ),
+            lambda: None,
+        )
+        return ()
+
+      # Initialize the pipeline.
+      for slot in range(min(max_concurrent_steps, num_steps)):
+        plgpu.copy_gmem_to_smem(
+            x_gmem.at[gmem_slice, pl.ds(slot * 16, 16)],
+            x_smem.at[slot],
+            barrier=barrier.at[slot],
+        )
+
+      jax.lax.fori_loop(0, num_steps, body, ())
+
+      # Finalize the pipeline.
+      plgpu.wait_smem_to_gmem(0)
+
+    x = jnp.arange(32 * 4 * 64).reshape(32 * 4, 64).astype(jnp.float32)
+    kernel_fn = pl.pallas_call(
+        kernel,
+        in_specs=[pl.BlockSpec(memory_space=plgpu.GMEM)],
+        out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=(4, 1),
+    )
+    np.testing.assert_array_equal(kernel_fn(x), x + 1.0)
 
 
 if __name__ == "__main__":
