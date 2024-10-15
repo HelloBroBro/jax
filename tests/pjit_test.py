@@ -38,6 +38,7 @@ from jax import dtypes
 from jax import stages
 from jax import lax
 from jax._src.lax import lax as lax_internal
+from jax._src.lib import xla_extension_version
 from jax.lax import with_sharding_constraint
 from jax._src import prng
 from jax.sharding import PartitionSpec as P, Mesh
@@ -4021,7 +4022,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     lowered_text = make_keys.lower(seeds).as_text()
     if config.use_shardy_partitioner.value:
-      self.assertIn('<@mesh, [{?}, {?}, {}]>', lowered_text)
+      self.assertIn('<@empty_mesh, [{?}, {?}, {}]>', lowered_text)
     else:
       self.assertIn('unspecified_dims=[0,1]', lowered_text)
 
@@ -4050,7 +4051,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     lowered_text = make_keys.lower(seeds).as_text()
     if config.use_shardy_partitioner.value:
-      self.assertIn('<@mesh, [{?}, {?}, {}]>', lowered_text)
+      self.assertIn('<@empty_mesh, [{?}, {?}, {}]>', lowered_text)
     else:
       self.assertIn('unspecified_dims=[0,1]', lowered_text)
 
@@ -4077,7 +4078,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     lowered_text = make_keys.lower(seeds).as_text()
     if config.use_shardy_partitioner.value:
-      self.assertIn('<@mesh, [{?}, {?}, {?}, {}]>', lowered_text)
+      self.assertIn('<@empty_mesh, [{?}, {?}, {?}, {}]>', lowered_text)
     else:
       self.assertIn('unspecified_dims=[0,1,2]', lowered_text)
 
@@ -4297,9 +4298,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertArraysEqual(out2, np.arange(8) * 2)
 
   def test_device_put_efficient_reshard_single_host(self):
-    if config.use_shardy_partitioner.value:
-      self.skipTest(
-          '_different_device_order_reshard is creating a GSPMDSharding')
     if jax.device_count() < 4:
       self.skipTest('Requires >= 4 devices')
 
@@ -4324,9 +4322,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
       ("8_384", (8, 384)),
   )
   def test_device_put_efficient_reshard_complex_mesh(self, shape):
-    if config.use_shardy_partitioner.value:
-      self.skipTest(
-          '_different_device_order_reshard is creating a GSPMDSharding')
     if jax.device_count() < 8:
       self.skipTest('Requires >= 8 devices')
 
@@ -4361,9 +4356,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
   def test_device_put_donate_pytree(self):
     shape1 = (8, 2)
     shape2 = (8, 384)
-    if config.use_shardy_partitioner.value:
-      self.skipTest(
-          '_different_device_order_reshard is creating a GSPMDSharding')
     if jax.device_count() < 8:
       self.skipTest('Requires >= 8 devices')
 
@@ -5396,6 +5388,21 @@ class UtilTest(jtu.JaxTestCase):
     self.assertFalse(hs4.subgroup_types())
     self.assertTrue(hs4.is_tiled())
 
+  def test_hlo_sharding_with_device_ordering(self):
+    if xla_extension_version < 291:
+      self.skipTest('Requires xla_extension_version >= 291')
+
+    hs1 = xc.HloSharding.subgroup_with_device_ordering(
+        np.array([[[0, 1], [2, 3]], [[4, 5], [6, 7]]], dtype=np.int64),
+        subgroup_types=[xc.OpSharding.Type.REPLICATED],
+    )
+    self.assertEqual(
+        hs1,
+        xc.HloSharding.iota_tile(
+            (2, 2, 2), subgroup_types=[xc.OpSharding.Type.REPLICATED]
+        ),
+    )
+
   def test_op_sharding_cache_on_mesh_pspec_sharding(self):
     ndim = 2
     mesh = jtu.create_mesh((4, 2), ('x', 'y'))
@@ -5476,12 +5483,13 @@ class UtilTest(jtu.JaxTestCase):
 
 
 @jtu.with_config(jax_use_shardy_partitioner=True)
-class SdyIntegrationTest(jtu.JaxTestCase):
+class ShardyTest(jtu.JaxTestCase):
 
   # TODO(bartchr): Once JAX is released with SDY, remove setUp.
   def setUp(self):
     if not dialects.sdy:
       raise unittest.SkipTest('Shardy is not available.')
+    super().setUp()
 
   def test_lowering_input_output_sharding(self):
     mesh = jtu.create_mesh((4, 2), ('x', 'y'))
