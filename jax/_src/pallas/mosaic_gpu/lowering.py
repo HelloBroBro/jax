@@ -22,7 +22,7 @@ import dataclasses
 import functools
 import itertools as it
 import math
-from typing import Any, Protocol, cast
+from typing import Any, Hashable, Protocol, cast
 
 import jax
 from jax import lax
@@ -156,8 +156,8 @@ def _run_scoped_resource_estimator(*consts, jaxpr: jax_core.Jaxpr) -> int:
 
 @_register_resource_estimator(lax.reduce_sum_p)
 def _reduce_sum_resource_estimator(x_aval: jax_core.ShapedArray, *, axes) -> int:
-  if axes != (0,):
-    raise NotImplementedError("No support for axes other than 0 yet")
+  # We don't need shmem for some reductons, but it depends on the layout, so we
+  # conservatively request some scratch space.
   return Resources(smem_scratch_bytes=4 * x_aval.dtype.itemsize)
 
 
@@ -346,7 +346,6 @@ def lower_jaxpr_to_module(
   block_mappings = grid_mapping.block_mappings
   _check_block_mappings(block_mappings, name_and_src_info)
 
-  block = (128, 1, 1)
   params = compiler_params.get("mosaic_gpu", {})
   approx_math = params.get("approx_math", False)
   max_concurrent_steps = params.get("max_concurrent_steps", 1)
@@ -368,7 +367,13 @@ def lower_jaxpr_to_module(
         f" {max_concurrent_steps=}, {delay_release=}"
     )
 
-  grid = [d for i, d in enumerate(grid_mapping.grid) if i not in sequential_axes]
+  block = (128, 1, 1)
+  grid = grid_mapping.grid
+  if grid_mapping.grid_names:  # Last dim corresponds to the warpgroup count
+    block = (128 * grid_mapping.grid[-1], 1, 1)
+    grid = grid[:-1]
+
+  grid = [d for i, d in enumerate(grid) if i not in sequential_axes]
   if len(grid) < 3:
     grid += (1,) * (3 - len(grid))
   else:
@@ -911,6 +916,7 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_smem, *leaves, tree):
   transform = jax.tree.unflatten(tree, leaves)
   swizzle = _is_swizzled(transform)
   x_smem = _handle_indexing(x_smem, transform)
+  # TODO(apaszke): The swizzled case should also check tiling!
   if swizzle is None:
     return mgpu.FragmentedArray.load_strided(
         x_smem, is_signed=mgpu_utils.is_signed(x_aval.dtype)
@@ -933,6 +939,7 @@ def _swap_lowering_rule(
   swizzle = _is_swizzled(transforms)
   x_smem = _handle_indexing(x_smem, transforms)
   x_aval = ctx.avals_in[0]
+  # TODO(apaszke): The swizzled case should also check tiling!
   if swizzle is None:
     old_value = mgpu.FragmentedArray.load_strided(
         x_smem, is_signed=mgpu_utils.is_signed(x_aval.dtype)
@@ -990,10 +997,18 @@ def _broadcast_in_dim_lowering_rule(
     broadcast_dimensions,
     shape,
 ):
+  [x_aval] = ctx.avals_in
+  [y_aval] = ctx.avals_out
+  x = _ensure_fa(x, x_aval.dtype)
+  if (
+      broadcast_dimensions == tuple(range(x_aval.ndim))
+      and y_aval.ndim == x_aval.ndim + 1
+      and x.layout == mgpu.WGMMA_ROW_LAYOUT
+  ):
+    return x.broadcast_minor(y_aval.shape[-1])
   if broadcast_dimensions:
     raise NotImplementedError
-  [x_aval] = ctx.avals_in
-  return _ensure_fa(x, x_aval.dtype).broadcast(shape)
+  return x.broadcast(shape)
 
 
 @register_lowering_rule(lax.convert_element_type_p)
@@ -1027,6 +1042,8 @@ mosaic_lowering_rules.update({
     lax.le_p: partial(_binary_op_lowering_rule, impl=lambda x, y: x <= y),
     lax.eq_p: partial(_binary_op_lowering_rule, impl=lambda x, y: x == y),
     lax.ne_p: partial(_binary_op_lowering_rule, impl=lambda x, y: x != y),
+    lax.max_p: partial(_binary_op_lowering_rule, impl=lambda x, y: x.max(y)),
+    lax.min_p: partial(_binary_op_lowering_rule, impl=lambda x, y: x.min(y)),
 })
 
 
@@ -1050,17 +1067,65 @@ def _logistic_lowering_rule(ctx: LoweringRuleContext, x):
   a = _ensure_fa(x, x_aval.dtype)
   return 1. / (1. + (-a).exp(approx=ctx.module_ctx.approx_math))
 
+@register_lowering_rule(lax.exp_p)
+def _exp_lowering_rule(ctx: LoweringRuleContext, x):
+  [x_aval] = ctx.avals_in
+  a = _ensure_fa(x, x_aval.dtype)
+  return a.exp(approx=ctx.module_ctx.approx_math)
+
 
 @register_lowering_rule(lax.reduce_sum_p)
 def _reduce_sum_lowering_rule(ctx: LoweringRuleContext, x, *, axes):
-  if axes != (0,):
-    raise NotImplementedError("No support for axes other than 0 yet")
   [x_aval] = ctx.avals_in
   _, [scratch] = ctx.module_ctx.scratch_view(
       [jax.ShapeDtypeStruct(shape=(4,), dtype=x_aval.dtype)]
   )
-  return mgpu.FragmentedArray.splat(
-      x.reduce_sum(scratch), (), is_signed=mgpu_utils.is_signed(x_aval.dtype)
+  match x.layout:
+    case mgpu.WGStridedFragLayout():
+      if axes != (0,):
+        raise NotImplementedError("No support for axes other than 0 yet")
+      return mgpu.FragmentedArray.splat(
+          x.reduce_sum(scratch), (), is_signed=mgpu_utils.is_signed(x_aval.dtype)
+      )
+    case mgpu.WGMMA_LAYOUT:
+      if axes != (x_aval.ndim - 1,):
+        raise NotImplementedError
+      if not jnp.issubdtype(x_aval.dtype, jnp.floating):
+        raise NotImplementedError
+      return x.reduce(arith_dialect.addf, axes[0])
+    case _:
+      raise NotImplementedError(f"Unsupported layout {x.layout}")
+
+
+@register_lowering_rule(lax.reduce_max_p)
+def _reduce_max_lowering_rule(ctx: LoweringRuleContext, x, *, axes):
+  [x_aval] = ctx.avals_in
+  match x.layout:
+    case mgpu.WGMMA_LAYOUT:
+      if axes != (x_aval.ndim - 1,):
+        raise NotImplementedError
+      if not jnp.issubdtype(x_aval.dtype, jnp.floating):
+        raise NotImplementedError
+      return x.reduce(arith_dialect.maxnumf, axes[0])
+    case _:
+      raise NotImplementedError(f"Unsupported layout {x.layout}")
+
+
+@register_lowering_rule(lax.axis_index_p)
+def _axis_index_rule(ctx: LoweringRuleContext, *, axis_name: Hashable):
+  grid_names = ctx.module_ctx.grid_mapping.grid_names
+  if grid_names and axis_name in grid_names:
+    if axis_name == grid_names[-1]:
+      return mgpu.warpgroup_idx(sync=False)
+    else:
+      raise NotImplementedError  # The code below is untested
+      idx = grid_names.index(axis_name)
+      return arith_dialect.index_cast(
+          ir.IntegerType.get_signless(32),
+          gpu_dialect.block_id(gpu_dialect.Dimension(idx)),
+      )
+  raise ValueError(
+      "Named axes can only refer to GPUMesh axes in Mosaic GPU kernels"
   )
 
 

@@ -4420,7 +4420,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
       return jnp.array(inp, dtype=np.float32, device=s)
 
     out = f()
-    print(f.trace().jaxpr)
     self.assertArraysEqual(out, inp.astype('float32'))
     self.assertEqual(out.sharding, s)
     self.assertEqual(out.dtype, np.float32)
@@ -4783,6 +4782,167 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     compiled_text = lowered.compile().as_text()
     if reduce and compiled_text is not None:
       self.assertIn('all-reduce', compiled_text)
+
+  @parameterized.named_parameters(
+      ('all', None, P('x', 'y'), P()),
+      ('first', 0, P('x', 'y'), P('y')),
+      ('second', 1, P('x', 'y'), P('x')),
+      ('first2', 0, P(('x', 'y'), None), P(None)),
+      ('second2', 1, P(('x', 'y'), None), P(('x', 'y')), False),
+  )
+  def test_reduce_max(self, axis, in_spec, out_spec, reduce=True):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    s = NamedSharding(mesh, in_spec)
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      self.assertEqual(x.sharding.spec, s.spec)
+      y = jnp.max(x, axis=axis)
+      self.assertEqual(y.sharding.spec, out_spec)
+      return y
+
+    out = f(arr)
+    self.assertArraysEqual(out, np.max(np_inp, axis=axis))
+    self.assertEqual(out.aval.sharding.spec, out_spec)
+
+    lowered = f.lower(arr)
+    self.assertIn('@Sharding', lowered.as_text())
+
+    compiled_text = lowered.compile().as_text()
+    if reduce and compiled_text is not None:
+      self.assertIn('all-reduce', compiled_text)
+
+  @parameterized.named_parameters(
+      ('0', 0, P(None, 'x', 'y')),
+      ('1', 1, P('x', None, 'y')),
+      ('2', 2, P('x', 'y', None)),
+      ('-1', -1, P('x', 'y', None)),
+  )
+  def test_broadcast_in_dim(self, axis, out_spec):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr = jax.device_put(np_inp, s)
+
+    out = jnp.expand_dims(arr, axis=axis)
+    self.assertEqual(out.aval.sharding.spec, out_spec)
+
+    @jax.jit
+    def f(x):
+      y = jnp.expand_dims(x, axis=axis)
+      self.assertEqual(y.sharding.spec, out_spec)
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.aval.sharding.spec, out_spec)
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('@Sharding', lowered_text)
+
+  @parameterized.named_parameters(
+      ('2', 2),
+      ('3', 3),
+      ('4', 4),
+  )
+  def test_integer_pow(self, pow):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      y = x ** pow
+      self.assertEqual(y.sharding.spec, s.spec)
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.sharding, s)
+    self.assertArraysEqual(out, np_inp ** pow)
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('@Sharding', lowered_text)
+
+  def test_sin_unop(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16.).reshape(8, 2)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      y = lax.sin(x)
+      self.assertEqual(y.sharding.spec, s.spec)
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.sharding, s)
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('@Sharding', lowered_text)
+
+  def test_jnp_array(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16, dtype=jnp.int32).reshape(8, 2)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      assert x.dtype == jnp.int32
+      y = jnp.array(x, dtype=jnp.float32)
+      self.assertEqual(y.dtype, jnp.float32)
+      self.assertEqual(y.sharding.spec, s.spec)
+      return y
+
+    f(arr)
+
+  def test_lax_transpose_rule(self):
+    mesh = jtu.create_mesh((2, 2, 1), ('x', 'y', 'z'))
+    np_inp = np.arange(16).reshape(4, 2, 2)
+    s = NamedSharding(mesh, P('x', 'y', 'z'))
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      y = jnp.transpose(x, (1, 2, 0))
+      self.assertEqual(y.sharding.spec, P('y', 'z', 'x'))
+      return y
+
+    out = f(arr)
+    self.assertArraysEqual(out, np.transpose(arr, (1, 2, 0)))
+    self.assertEqual(out.aval.sharding.spec, P('y', 'z', 'x'))
+
+    lowered_text = f.lower(arr).as_text()
+    self.assertIn('@Sharding', lowered_text)
+
+  def test_broadcasted_iota_with_sharding(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(4)
+    s = NamedSharding(mesh, P('x'))
+    arr = jax.device_put(np_inp, s)
+
+    @jax.jit
+    def f(x):
+      y = jax.nn.one_hot(x, 4)
+      self.assertEqual(y.sharding.spec, P('x', None))
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.aval.sharding.spec, P('x', None))
+
+    @jax.jit
+    def g(x):
+      x = x * 2
+      y = jax.lax.broadcasted_iota(
+          x.dtype, (8, 2), 0, _sharding=NamedSharding(mesh, P('x', 'y')))
+      self.assertEqual(y.sharding.spec, P('x', 'y'))
+      return x, y
+
+    _, out = g(arr)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('x', 'y')))
 
 
 @jtu.pytest_mark_if_available('multiaccelerator')

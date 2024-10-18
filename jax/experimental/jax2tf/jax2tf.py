@@ -1758,7 +1758,7 @@ tf_impl[lax.sub_p] = tf.math.subtract
 tf_impl[lax.mul_p] = tf.math.multiply
 
 
-def _iota(*, dtype, shape, dimension):
+def _iota(*, dtype, shape, dimension, sharding):
   dtype = _to_tf_dtype(dtype)
   # Some dtypes are unsupported, like uint32, so we just fall back to int32.
   # TODO(mattjj, necula): improve tf.range dtype handling
@@ -3314,12 +3314,16 @@ def _svd(
     full_matrices: bool,
     compute_uv: bool,
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: lax.linalg.SvdAlgorithm | None = None,
 ):
   if not (
       subset_by_index is None
       or subset_by_index == (0, min(operand.shape[-1], operand.shape[-2]))
   ):
     raise NotImplementedError("subset_by_index is not implemented")
+
+  if algorithm is not None and algorithm != lax.linalg.SvdAlgorithm.DEFAULT:
+    raise NotImplementedError("SVD algorithm is not implemented")
 
   result = tf.linalg.svd(operand, full_matrices, compute_uv)
   if not compute_uv:
