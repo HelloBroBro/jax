@@ -32,10 +32,11 @@ from functools import partial
 import importlib
 import math
 import operator
+import os
 import string
 import types
-from typing import ( Any, Literal, NamedTuple,
-                    Protocol, TypeVar, Union,overload)
+from typing import (Any, IO, Literal, NamedTuple,
+                    Protocol, TypeVar, Union, overload)
 import warnings
 
 import jax
@@ -320,11 +321,43 @@ def _convert_and_clip_integer(val: ArrayLike, dtype: DType) -> Array:
   return clip(val, min_val, max_val).astype(dtype)
 
 
-@util.implements(np.load, update_doc=False)
-def load(*args: Any, **kwargs: Any) -> Array:
+def load(file: IO[bytes] | str | os.PathLike[Any], *args: Any, **kwargs: Any) -> Array:
+  """Load JAX arrays from npy files.
+
+  JAX wrapper of :func:`numpy.load`.
+
+  This function is a simple wrapper of :func:`numpy.load`, but in the case of
+  ``.npy`` files created with :func:`numpy.save` or :func:`jax.numpy.save`,
+  the output will be returned as a :class:`jax.Array`, and ``bfloat16`` data
+  types will be restored. For ``.npz`` files, results will be returned as
+  normal NumPy arrays.
+
+  This function requires concrete array inputs, and is not compatible with
+  transformations like :func:`jax.jit` or :func:`jax.vmap`.
+
+  Args:
+    file: string, bytes, or path-like object containing the array data.
+    args, kwargs: for additional arguments, see :func:`numpy.load`
+
+  Returns:
+    the array stored in the file.
+
+  See also:
+    - :func:`jax.numpy.save`: save an array to a file.
+
+  Examples:
+    >>> import io
+    >>> f = io.BytesIO()  # use an in-memory file-like object.
+    >>> x = jnp.array([2, 4, 6, 8], dtype='bfloat16')
+    >>> jnp.save(f, x)
+    >>> f.seek(0)
+    0
+    >>> jnp.load(f)
+    Array([2, 4, 6, 8], dtype=bfloat16)
+  """
   # The main purpose of this wrapper is to recover bfloat16 data types.
   # Note: this will only work for files created via np.save(), not np.savez().
-  out = np.load(*args, **kwargs)
+  out = np.load(file, *args, **kwargs)
   if isinstance(out, np.ndarray):
     # numpy does not recognize bfloat16, so arrays are serialized as void16
     if out.dtype == 'V2':
@@ -1754,7 +1787,7 @@ def diff(a: ArrayLike, n: int = 1, axis: int = -1,
   slice1_tuple = tuple(slice1)
   slice2_tuple = tuple(slice2)
 
-  op = ufuncs.not_equal if arr.dtype == np.bool_ else ufuncs.subtract
+  op = operator.ne if arr.dtype == np.bool_ else operator.sub
   for _ in range(n):
     arr = op(arr[slice1_tuple], arr[slice2_tuple])
 
@@ -6444,7 +6477,7 @@ def _arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
     if (not dtypes.issubdtype(start_dtype, np.integer) and
         not dtypes.issubdtype(start_dtype, dtypes.extended)):
       ceil_ = ufuncs.ceil if isinstance(start, core.Tracer) else np.ceil
-      start = ceil_(start).astype(int)  # type: ignore[operator]
+      start = ceil_(start).astype(int)
     return lax.iota(dtype, start)  # type: ignore[arg-type]
   else:
     if step is None and start == 0 and stop is not None:
@@ -9511,10 +9544,82 @@ def outer(a: ArrayLike, b: ArrayLike, out: None = None) -> Array:
   a, b = util.promote_dtypes(a, b)
   return ravel(a)[:, None] * ravel(b)[None, :]
 
-@util.implements(np.cross)
+
 @partial(jit, static_argnames=('axisa', 'axisb', 'axisc', 'axis'))
 def cross(a, b, axisa: int = -1, axisb: int = -1, axisc: int = -1,
           axis: int | None = None):
+  r"""Compute the (batched) cross product of two arrays.
+
+  JAX implementation of :func:`numpy.cross`.
+
+  This computes the 2-dimensional or 3-dimensional cross product,
+
+  .. math::
+
+     c = a \times b
+
+  In 3 dimensions, ``c`` is a length-3 array. In 2 dimensions, ``c`` is
+  a scalar.
+
+  Args:
+    a: N-dimensional array. ``a.shape[axisa]`` indicates the dimension of
+       the cross product, and must be 2 or 3.
+    b: N-dimensional array. Must have ``b.shape[axisb] == a.shape[axisb]``,
+      and other dimensions of ``a`` and ``b`` must be broadcast compatible.
+    axisa: specicy the axis of ``a`` along which to compute the cross product.
+    axisb: specicy the axis of ``b`` along which to compute the cross product.
+    axisc: specicy the axis of ``c`` along which the cross product result
+      will be stored.
+    axis: if specified, this overrides ``axisa``, ``axisb``, and ``axisc``
+      with a single value.
+
+  Returns:
+    The array ``c`` containing the (batched) cross product of ``a`` and ``b``
+    along the specified axes.
+
+  See also:
+    - :func:`jax.numpy.linalg.cross`: an array API compatible function for
+      computing cross products over 3-vectors.
+
+  Examples:
+    A 2-dimensional cross product returns a scalar:
+
+    >>> a = jnp.array([1, 2])
+    >>> b = jnp.array([3, 4])
+    >>> jnp.cross(a, b)
+    Array(-2, dtype=int32)
+
+    A 3-dimensional cross product returns a length-3 vector:
+
+    >>> a = jnp.array([1, 2, 3])
+    >>> b = jnp.array([4, 5, 6])
+    >>> jnp.cross(a, b)
+    Array([-3,  6, -3], dtype=int32)
+
+    With multi-dimensional inputs, the cross-product is computed along
+    the last axis by default. Here's a batched 3-dimensional cross
+    product, operating on the rows of the inputs:
+
+    >>> a = jnp.array([[1, 2, 3],
+    ...                [3, 4, 3]])
+    >>> b = jnp.array([[2, 3, 2],
+    ...                [4, 5, 6]])
+    >>> jnp.cross(a, b)
+    Array([[-5,  4, -1],
+           [ 9, -6, -1]], dtype=int32)
+
+    Specifying axis=0 makes this a batched 2-dimensional cross product,
+    operating on the columns of the inputs:
+
+    >>> jnp.cross(a, b, axis=0)
+    Array([-2, -2, 12], dtype=int32)
+
+    Equivalently, we can independently specify the axis of the inputs ``a``
+    and ``b`` and the output ``c``:
+
+    >>> jnp.cross(a, b, axisa=0, axisb=0, axisc=0)
+    Array([-2, -2, 12], dtype=int32)
+  """
   # TODO(jakevdp): NumPy 2.0 deprecates 2D inputs. Follow suit here.
   util.check_arraylike("cross", a, b)
   if axis is not None:

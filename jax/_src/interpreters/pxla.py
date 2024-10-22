@@ -1750,7 +1750,7 @@ def _get_and_check_device_assignment(
   elif first_sharding_info is None:
     final_device_assignment = (_get_default_device(),)
   else:
-    final_device_assignment = first_sharding_info[0]
+    final_device_assignment = first_sharding_info[0]  # type: ignore
   return xb.get_device_backend(final_device_assignment[0]), final_device_assignment
 
 MaybeSharding = Union[JSharding, UnspecifiedValue]
@@ -1868,7 +1868,8 @@ def _raise_warnings_or_errors_for_jit_of_pmap(
          "does not preserve sharded data representations and instead collects "
          "input and output arrays onto a single device. "
          "Consider removing the outer jit unless you know what you're doing. "
-         "See https://github.com/jax-ml/jax/issues/2926.")
+         "See https://github.com/jax-ml/jax/issues/2926. Or "
+         "use jax.experimental.shard_map instead of pmap under jit compilation.")
 
   if nreps > xb.device_count(backend):
     raise ValueError(
