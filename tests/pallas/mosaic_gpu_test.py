@@ -287,6 +287,29 @@ class PallasCallTest(PallasTest):
     x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
     np.testing.assert_array_equal(f(x), x)
 
+  def test_scoped_copy_with_transforms(self):
+    ts = (plgpu.TilingTransform((64, 32)), plgpu.SwizzleTransform(128))
+    def kernel(x_ref, o_ref, barrier_ref):
+      def body(tmp_ref):
+        plgpu.copy_gmem_to_smem(x_ref, tmp_ref, barrier=barrier_ref)
+        plgpu.barrier_wait(barrier_ref)
+        o_ref[...] = tmp_ref[...] * 2
+      pl.run_scoped(body, plgpu.SMEM((128, 128), jnp.float32, transforms=ts))
+
+    in_spec = pl.BlockSpec(memory_space=plgpu.GMEM)
+    out_spec = plgpu.GPUBlockSpec(
+        (128, 128), lambda: (0, 0), transforms=ts, memory_space=plgpu.SMEM,
+    )
+    f = pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct([128, 128], jnp.float32),
+        in_specs=(in_spec,),
+        out_specs=out_spec,
+        scratch_shapes=[plgpu.Barrier(num_arrivals=1)],
+    )
+    x = jnp.arange(128 * 128, dtype=jnp.float32).reshape(128, 128)
+    np.testing.assert_array_equal(f(x), x * 2)
+
   def test_copy_with_transforms_and_indexing(self):
     def kernel(x_ref, o_ref, barrier_ref):
       for i in range(2):
@@ -1000,6 +1023,28 @@ class CoreMapTest(PallasTest):
       return inner(y_init)
     np.testing.assert_array_equal(
         f(), np.repeat(np.arange(2), 128).reshape(2, 128)
+    )
+
+  def test_multiple_wg_with_grid(self):
+    mesh = plgpu.GPUMesh(grid=(2, 2), num_threads=2, axis_names=("x", "y", "wg"))
+
+    @jax.jit
+    def f():
+      @pl.run_state
+      def inner(y_ref):
+        @pl.core_map(mesh)
+        def kernel():
+          xy_idx = jax.lax.axis_index(("x", "y"))
+          yx_idx = jax.lax.axis_index(("y", "x"))
+          wg_idx = jax.lax.axis_index("wg")
+          num_wgs = jax.lax.psum(1, "wg")
+          y_ref[xy_idx, wg_idx] = jnp.broadcast_to(
+              yx_idx * num_wgs + wg_idx, (128,)
+          )
+      y_init = jnp.zeros((4, 2, 128), np.int32)
+      return inner(y_init)
+    np.testing.assert_array_equal(
+        f(), np.repeat([0, 1, 4, 5, 2, 3, 6, 7], 128).reshape(4, 2, 128)
     )
 
 

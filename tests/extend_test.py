@@ -245,7 +245,7 @@ class FfiTest(jtu.JaxTestCase):
   @jtu.sample_product(
       shape=[(1,), (4,), (5,)],
       dtype=(np.int32,),
-      vmap_method=("broadcast", "broadcast_fullrank", "sequential",
+      vmap_method=("expand_dims", "broadcast_all", "sequential",
                    "legacy_vectorized"),
   )
   @jtu.run_on_devices("gpu")
@@ -294,6 +294,16 @@ def ffi_call_lu_pivots_to_permutation(pivots, permutation_size, **kwargs):
       ),
       **kwargs,
   )(pivots)
+
+
+class MlirRegisterLoweringTest(jtu.JaxTestCase):
+
+  def test_unknown_platform_error(self):
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        "Registering an MLIR lowering rule for primitive .+ for an unknown "
+        "platform foo. Known platforms are: .+."):
+      mlir.register_lowering(prim=None, rule=None, platform="foo")
 
 
 if __name__ == "__main__":

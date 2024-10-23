@@ -67,10 +67,10 @@ from jax._src.typing import (
   DType, DTypeLike, DeprecatedArg, DimSize, DuckTypedArray, Shape, StaticScalar,
 )
 from jax._src.util import (
-                           NumpyComplexWarning,
-                           canonicalize_axis as _canonicalize_axis,
-                           ceil_of_ratio, partition_list, safe_zip, subvals,unzip2)
-from jax.sharding import Sharding, SingleDeviceSharding
+    NumpyComplexWarning, canonicalize_axis as _canonicalize_axis,
+    ceil_of_ratio, partition_list, safe_zip, subvals,unzip2)
+from jax.sharding import (Sharding, SingleDeviceSharding, NamedSharding,
+                          PartitionSpec as P)
 from jax.tree_util import tree_flatten, tree_leaves, tree_map
 import numpy as np
 import opt_einsum
@@ -6215,9 +6215,86 @@ def from_dlpack(x: Any, /, *, device: xc.Device | Sharding | None = None,
   from jax.dlpack import from_dlpack  # pylint: disable=g-import-not-at-top
   return from_dlpack(x, device=device, copy=copy)
 
-@util.implements(np.fromfunction)
+
 def fromfunction(function: Callable[..., Array], shape: Any,
                  *, dtype: DTypeLike = float, **kwargs) -> Array:
+  """Create an array from a function applied over indices.
+
+  JAX implementation of :func:`numpy.fromfunction`. The JAX implementation
+  differs in that it dispatches via :func:`jax.vmap`, and so unlike in NumPy
+  the function logically operates on scalar inputs, and need not explicitly
+  handle broadcasted inputs (See *Examples* below).
+
+  Args:
+    function: a function that takes *N* dynamic scalars and outputs a scalar.
+    shape: a length-*N* tuple of integers specifying the output shape.
+    dtype: optionally specify the dtype of the inputs. Defaults to floating-point.
+    kwargs: additional keyword arguments are passed statically to ``function``.
+
+  Returns:
+    An array of shape ``shape`` if ``function`` returns a scalar, or in general
+    a pytree of arrays with leading dimensions ``shape``, as determined by the
+    output of ``function``.
+
+  See also:
+    - :func:`jax.vmap`: the core transformation that the :func:`fromfunction`
+      API is built on.
+
+  Examples:
+    Generate a multiplication table of a given shape:
+
+    >>> jnp.fromfunction(jnp.multiply, shape=(3, 6), dtype=int)
+    Array([[ 0,  0,  0,  0,  0,  0],
+           [ 0,  1,  2,  3,  4,  5],
+           [ 0,  2,  4,  6,  8, 10]], dtype=int32)
+
+    When ``function`` returns a non-scalar the output will have leading
+    dimension of ``shape``:
+
+    >>> def f(x):
+    ...   return (x + 1) * jnp.arange(3)
+    >>> jnp.fromfunction(f, shape=(2,))
+    Array([[0., 1., 2.],
+           [0., 2., 4.]], dtype=float32)
+
+    ``function`` may return multiple results, in which case each is mapped
+    independently:
+
+    >>> def f(x, y):
+    ...   return x + y, x * y
+    >>> x_plus_y, x_times_y = jnp.fromfunction(f, shape=(3, 5))
+    >>> print(x_plus_y)
+    [[0. 1. 2. 3. 4.]
+     [1. 2. 3. 4. 5.]
+     [2. 3. 4. 5. 6.]]
+    >>> print(x_times_y)
+    [[0. 0. 0. 0. 0.]
+     [0. 1. 2. 3. 4.]
+     [0. 2. 4. 6. 8.]]
+
+    The JAX implementation differs slightly from NumPy's implementation. In
+    :func:`numpy.fromfunction`, the function is expected to explicitly operate
+    element-wise on the full grid of input values:
+
+    >>> def f(x, y):
+    ...   print(f"{x.shape = }\\n{y.shape = }")
+    ...   return x + y
+    ...
+    >>> np.fromfunction(f, (2, 3))
+    x.shape = (2, 3)
+    y.shape = (2, 3)
+    array([[0., 1., 2.],
+           [1., 2., 3.]])
+
+    In :func:`jax.numpy.fromfunction`, the function is vectorized via
+    :func:`jax.vmap`, and so is expected to operate on scalar values:
+
+    >>> jnp.fromfunction(f, (2, 3))
+    x.shape = ()
+    y.shape = ()
+    Array([[0., 1., 2.],
+           [1., 2., 3.]], dtype=float32)
+  """
   shape = core.canonicalize_shape(shape, context="shape argument of jnp.fromfunction()")
   for i in range(len(shape)):
     in_axes = [0 if i == j else None for j in range(len(shape))]
@@ -6836,6 +6913,7 @@ def meshgrid(*xi: ArrayLike, copy: bool = True, sparse: bool = False,
     A length-N list of grid arrays.
 
   See also:
+    - :func:`jax.numpy.indices`: generate a grid of indices.
     - :obj:`jax.numpy.mgrid`: create a meshgrid using indexing syntax.
     - :obj:`jax.numpy.ogrid`: create an open meshgrid using indexing syntax.
 
@@ -7008,9 +7086,38 @@ def indices(dimensions: Sequence[int], dtype: DTypeLike | None = None,
 @overload
 def indices(dimensions: Sequence[int], dtype: DTypeLike | None = None,
             sparse: bool = False) -> Array | tuple[Array, ...]: ...
-@util.implements(np.indices)
 def indices(dimensions: Sequence[int], dtype: DTypeLike | None = None,
             sparse: bool = False) -> Array | tuple[Array, ...]:
+  """Generate arrays of grid indices.
+
+  JAX implementation of :func:`numpy.indices`.
+
+  Args:
+    dimensions: the shape of the grid.
+    dtype: the dtype of the indices (defaults to integer).
+    sparse: if True, then return sparse indices. Default is False, which
+      returns dense indices.
+
+  Returns:
+    An array of shape ``(len(dimensions), *dimensions)`` If ``sparse`` is False,
+    or a sequence of arrays of the same length as ``dimensions`` if ``sparse`` is True.
+
+  See also:
+    - :func:`jax.numpy.meshgrid`: generate a grid from arbitrary input arrays.
+    - :obj:`jax.numpy.mgrid`: generate dense indices using a slicing syntax.
+    - :obj:`jax.numpy.ogrid`: generate sparse indices using a slicing syntax.
+
+  Examples:
+    >>> jnp.indices((2, 3))
+    Array([[[0, 0, 0],
+            [1, 1, 1]],
+    <BLANKLINE>
+           [[0, 1, 2],
+            [0, 1, 2]]], dtype=int32)
+    >>> jnp.indices((2, 3), sparse=True)
+    (Array([[0],
+           [1]], dtype=int32), Array([[0, 1, 2]], dtype=int32))
+  """
   dtypes.check_user_dtype_supported(dtype, "indices")
   dtype = dtype or dtypes.canonicalize_dtype(int_)
   dimensions = tuple(
@@ -8230,6 +8337,9 @@ def delete(
     may specify ``assume_unique_indices=True`` to perform the operation in a
     manner that does not require static indices.
 
+  See also:
+    - :func:`jax.numpy.insert`: insert entries into an array.
+
   Examples:
     Delete entries from a 1D array:
 
@@ -8323,9 +8433,55 @@ def delete(
   return a[tuple(slice(None) for i in range(axis)) + (mask,)]
 
 
-@util.implements(np.insert)
 def insert(arr: ArrayLike, obj: ArrayLike | slice, values: ArrayLike,
            axis: int | None = None) -> Array:
+  """Insert entries into an array at specified indices.
+
+  JAX implementation of :func:`numpy.insert`.
+
+  Args:
+    arr: array object into which values will be inserted.
+    obj: slice or array of indices specifying insertion locations.
+    values: array of values to be inserted.
+    axis: specify the insertion axis in the case of multi-dimensional
+      arrays. If unspecified, ``arr`` will be flattened.
+
+  Returns:
+    A copy of ``arr`` with values inserted at the specified locations.
+
+  See also:
+    - :func:`jax.numpy.delete`: delete entries from an array.
+
+  Examples:
+    Inserting a single value:
+
+    >>> x = jnp.arange(5)
+    >>> jnp.insert(x, 2, 99)
+    Array([ 0,  1, 99,  2,  3,  4], dtype=int32)
+
+    Inserting multiple identical values using a slice:
+
+    >>> jnp.insert(x, slice(None, None, 2), -1)
+    Array([-1,  0,  1, -1,  2,  3, -1,  4], dtype=int32)
+
+    Inserting multiple values using an index:
+
+    >>> indices = jnp.array([4, 2, 5])
+    >>> values = jnp.array([10, 11, 12])
+    >>> jnp.insert(x, indices, values)
+    Array([ 0,  1, 11,  2,  3, 10,  4, 12], dtype=int32)
+
+    Inserting columns into a 2D array:
+
+    >>> x = jnp.array([[1, 2, 3],
+    ...                [4, 5, 6]])
+    >>> indices = jnp.array([1, 3])
+    >>> values = jnp.array([[10, 11],
+    ...                     [12, 13]])
+    >>> jnp.insert(x, indices, values, axis=1)
+    Array([[ 1, 10,  2,  3, 11],
+           [ 4, 12,  5,  6, 13]], dtype=int32)
+  """
   util.check_arraylike("insert", arr, 0 if isinstance(obj, slice) else obj, values)
   a = asarray(arr)
   values_arr = asarray(values)
@@ -8955,6 +9111,7 @@ def einsum(
     precision: PrecisionLike = None,
     preferred_element_type: DTypeLike | None = None,
     _dot_general: Callable[..., Array] = lax.dot_general,
+    out_type=None,
 ) -> Array: ...
 
 @overload
@@ -8967,6 +9124,7 @@ def einsum(
     precision: PrecisionLike = None,
     preferred_element_type: DTypeLike | None = None,
     _dot_general: Callable[..., Array] = lax.dot_general,
+    out_type=None,
 ) -> Array: ...
 
 def einsum(
@@ -8977,6 +9135,7 @@ def einsum(
     precision: PrecisionLike = None,
     preferred_element_type: DTypeLike | None = None,
     _dot_general: Callable[..., Array] = lax.dot_general,
+    out_type=None,
 ) -> Array:
   """Einstein summation
 
@@ -9208,11 +9367,11 @@ def einsum(
 
   contractions = tuple((a, frozenset(b), c) for a, b, c, *_ in contractions)
 
-  einsum = jit(_einsum, static_argnums=(1, 2, 3, 4), inline=True)
+  einsum = jit(_einsum, static_argnums=(1, 2, 3, 4, 5), inline=True)
   if spec is not None:
     einsum = jax.named_call(einsum, name=spec)
   return einsum(operands, contractions, precision,
-                preferred_element_type, _dot_general)
+                preferred_element_type, _dot_general, out_type)
 
 
 # Enable other modules to override einsum_contact_path.
@@ -9311,7 +9470,15 @@ def _einsum(
     precision,
     preferred_element_type,
     _dot_general=lax.dot_general,
+    out_type=None,
 ):
+  if out_type is not None and not config.sharding_in_types.value:
+    raise NotImplementedError("out_type only works when sharding_in_types "
+                              "config is True.")
+  if out_type is not None and not isinstance(out_type, NamedSharding):
+    raise NotImplementedError(
+        "`out_type` argument of `einsum` only supports NamedSharding instances."
+        " Please file a bug if this is not enough for your use case.")
   dtypes.check_user_dtype_supported(preferred_element_type, "einsum")
   operands = list(map(asarray, operands))
   if preferred_element_type is None:
@@ -9433,13 +9600,25 @@ def _einsum(
       names = batch_names_str + remaining_rhs_names + remaining_lhs_names
       if names == result_names:
         dimension_numbers = ((rhs_cont, lhs_cont), (rhs_batch, lhs_batch))
+        k_out_type = {} if out_type is None else {'out_type': out_type}
         operand = _dot_general(rhs, lhs, dimension_numbers, precision,
-                               preferred_element_type=preferred_element_type)
+                               preferred_element_type=preferred_element_type,
+                               **k_out_type)
       else:
         names = batch_names_str + remaining_lhs_names + remaining_rhs_names
+        if (config.sharding_in_types.value and out_type is not None and
+            names != result_names):
+          spec = out_type.spec
+          inverse_spec = tuple(spec[result_names.index(name)] for name in names)
+          dot_general_out_type = NamedSharding(out_type.mesh, P(*inverse_spec))
+        else:
+          dot_general_out_type = out_type  # type: ignore
         dimension_numbers = ((lhs_cont, rhs_cont), (lhs_batch, rhs_batch))
+        dot_general_out_type = ({} if dot_general_out_type is None else  # type: ignore
+                                {'out_type': dot_general_out_type})
         operand = _dot_general(lhs, rhs, dimension_numbers, precision,
-                               preferred_element_type=preferred_element_type)
+                               preferred_element_type=preferred_element_type,
+                               **dot_general_out_type)
     else:
       raise NotImplementedError  # if this is actually reachable, open an issue!
 
@@ -9452,7 +9631,8 @@ def _einsum(
       operand = lax.transpose(operand, perm)
     operands.append(operand)  # used in next iteration
 
-  return lax_internal._convert_element_type(operands[0], preferred_element_type, output_weak_type)
+  return lax_internal._convert_element_type(operands[0], preferred_element_type,
+                                            output_weak_type)
 
 
 @partial(jit, static_argnames=('precision', 'preferred_element_type'), inline=True)
@@ -10154,9 +10334,69 @@ def sort_complex(a: ArrayLike) -> Array:
   a = lax.sort(asarray(a))
   return lax.convert_element_type(a, dtypes.to_complex_dtype(a.dtype))
 
-@util.implements(np.lexsort)
+
 @partial(jit, static_argnames=('axis',))
 def lexsort(keys: Array | np.ndarray | Sequence[ArrayLike], axis: int = -1) -> Array:
+  """Sort a sequence of keys in lexicographic order.
+
+  JAX implementation of :func:`numpy.lexsort`.
+
+  Args:
+    keys: a sequence of arrays to sort; all arrays must have the same shape.
+      The last key in the sequence is used as the primary key.
+    axis: the axis along which to sort (default: -1).
+
+  Returns:
+    An array of integers of shape ``keys[0].shape`` giving the indices of the
+    entries in lexicographically-sorted order.
+
+  See also:
+    - :func:`jax.numpy.argsort`: sort a single entry by index.
+    - :func:`jax.lax.sort`: direct XLA sorting API.
+
+  Examples:
+    :func:`lexsort` with a single key is equivalent to :func:`argsort`:
+
+    >>> key1 = jnp.array([4, 2, 3, 2, 5])
+    >>> jnp.lexsort([key1])
+    Array([1, 3, 2, 0, 4], dtype=int32)
+    >>> jnp.argsort(key1)
+    Array([1, 3, 2, 0, 4], dtype=int32)
+
+    With multiple keys, :func:`lexsort` uses the last key as the primary key:
+
+    >>> key2 = jnp.array([2, 1, 1, 2, 2])
+    >>> jnp.lexsort([key1, key2])
+    Array([1, 2, 3, 0, 4], dtype=int32)
+
+    The meaning of the indices become more clear when printing the sorted keys:
+
+    >>> indices = jnp.lexsort([key1, key2])
+    >>> print(f"{key1[indices]}\\n{key2[indices]}")
+    [2 3 2 4 5]
+    [1 1 2 2 2]
+
+    Notice that the elements of ``key2`` appear in order, and within the sequences
+    of duplicated values the corresponding elements of ```key1`` appear in order.
+
+    For multi-dimensional inputs, :func:`lexsort` defaults to sorting along the
+    last axis:
+
+    >>> key1 = jnp.array([[2, 4, 2, 3],
+    ...                   [3, 1, 2, 2]])
+    >>> key2 = jnp.array([[1, 2, 1, 3],
+    ...                   [2, 1, 2, 1]])
+    >>> jnp.lexsort([key1, key2])
+    Array([[0, 2, 1, 3],
+           [1, 3, 2, 0]], dtype=int32)
+
+    A different sort axis can be chosen using the ``axis`` keyword; here we sort
+    along the leading axis:
+
+    >>> jnp.lexsort([key1, key2], axis=0)
+    Array([[0, 1, 0, 1],
+           [1, 0, 1, 0]], dtype=int32)
+  """
   key_tuple = tuple(keys)
   util.check_arraylike("lexsort", *key_tuple)
   key_arrays = tuple(asarray(k) for k in key_tuple)
