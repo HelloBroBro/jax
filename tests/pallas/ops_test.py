@@ -793,12 +793,15 @@ class OpsTest(PallasBaseTest):
       self.skipTest(f"{fn.__name__} not implemented on TPU")
 
     @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), dtype), grid=1
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((8, 128), dtype),
+        grid=1,
     )
     def kernel(x_ref, o_ref):
       o_ref[:] = fn(x_ref[...])
 
-    x = jnp.array([0.42, 2.4]).astype(dtype)
+    # create an array with shape (8, 128)
+    x = jnp.array([0.42, 2.4] * (8 * 128 // 2)).reshape(8, 128).astype(dtype)
     self.assertAllClose(kernel(x), fn(x), rtol=1e-6)
 
   @parameterized.named_parameters(
@@ -868,9 +871,6 @@ class OpsTest(PallasBaseTest):
       ("float64", "float64"),
   )
   def test_pow(self, x_dtype, y_dtype):
-    if jtu.test_device_matches(["tpu"]):
-      self.skipTest("TODO: Error on TPU")
-
     if not jax.config.x64_enabled and jnp.dtype(x_dtype).itemsize == 8:
       self.skipTest("64-bit types require x64_enabled")
 

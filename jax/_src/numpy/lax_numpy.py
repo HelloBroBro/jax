@@ -3900,10 +3900,63 @@ def flatnonzero(a: ArrayLike, *, size: int | None = None,
   return nonzero(ravel(a), size=size, fill_value=fill_value)[0]
 
 
-@util.implements(np.unwrap)
 @partial(jit, static_argnames=('axis',))
 def unwrap(p: ArrayLike, discont: ArrayLike | None = None,
            axis: int = -1, period: ArrayLike = 2 * pi) -> Array:
+  """Unwrap a periodic signal.
+
+  JAX implementation of :func:`numpy.unwrap`.
+
+  Args:
+    p: input array
+    discont: the maximum allowable discontinuity in the sequence. The
+      default is ``period / 2``
+    axis: the axis along which to unwrap; defaults to -1
+    period: the period of the signal, which defaults to :math:`2\\pi`
+
+  Returns:
+    An unwrapped copy of ``p``.
+
+  Examples:
+    Consider a situation in which you are making measurements of the position of
+    a rotating disk via the ``x`` and ``y`` locations of some point on that disk.
+    The underlying variable is an always-increating angle which we'll generate
+    this way, using degrees for ease of representation:
+
+    >>> rng = np.random.default_rng(0)
+    >>> theta = rng.integers(0, 90, size=(20,)).cumsum()
+    >>> theta
+    array([ 76, 133, 179, 203, 230, 233, 239, 240, 255, 328, 386, 468, 513,
+           567, 654, 719, 775, 823, 873, 957])
+
+    Our observations of this angle are the ``x`` and ``y`` coordinates, given by
+    the sine and cosine of this underlying angle:
+
+    >>> x, y = jnp.sin(jnp.deg2rad(theta)), jnp.cos(jnp.deg2rad(theta))
+
+    Now, say that given these ``x`` and ``y`` coordinates, we wish to recover
+    the original angle ``theta``. We might do this via the :func:`atan2` function:
+
+    >>> theta_out = jnp.rad2deg(jnp.atan2(x, y)).round()
+    >>> theta_out
+    Array([  76.,  133.,  179., -157., -130., -127., -121., -120., -105.,
+            -32.,   26.,  108.,  153., -153.,  -66.,   -1.,   55.,  103.,
+            153., -123.], dtype=float32)
+
+    The first few values match the input angle ``theta`` above, but after this the
+    values are wrapped because the ``sin`` and ``cos`` observations obscure the phase
+    information. The purpose of the :func:`unwrap` function is to recover the original
+    signal from this wrapped view of it:
+
+    >>> jnp.unwrap(theta_out, period=360)
+    Array([ 76., 133., 179., 203., 230., 233., 239., 240., 255., 328., 386.,
+           468., 513., 567., 654., 719., 775., 823., 873., 957.],      dtype=float32)
+
+    It does this by assuming that the true underlying sequence does not differ by more than
+    ``discont`` (which defaults to ``period / 2``) within a single step, and when it encounters
+    a larger discontinuity it adds factors of the period to the data. For periodic signals
+    that satisfy this assumption, :func:`unwrap` can recover the original phased signal.
+  """
   util.check_arraylike("unwrap", p)
   p = asarray(p)
   if issubdtype(p.dtype, np.complexfloating):
@@ -5045,9 +5098,77 @@ def _block(xs: ArrayLike | list[ArrayLike]) -> tuple[Array, int]:
   else:
     return asarray(xs), 1
 
-@util.implements(np.block)
+
 @jit
 def block(arrays: ArrayLike | list[ArrayLike]) -> Array:
+  """Create an array from a list of blocks.
+
+  JAX implementation of :func:`numpy.block`.
+
+  Args:
+    arrays: an array, or nested list of arrays which will be concatenated
+      together to form the final array.
+
+  Returns:
+    a single array constructed from the inputs.
+
+  See also:
+    - :func:`concatenate`, :func:`concat`: concatenate arrays along an existing axis.
+    - :func:`stack`, :func:`vstack`, :func:`hstack`, :func:`dstack` concatenate
+      arrays along a new axis.
+
+  Examples:
+    consider these blocks:
+
+    >>> zeros = jnp.zeros((2, 2))
+    >>> ones = jnp.ones((2, 2))
+    >>> twos = jnp.full((2, 2), 2)
+    >>> threes = jnp.full((2, 2), 3)
+
+    Passing a single array to :func:`block` returns the array:
+
+    >>> jnp.block(zeros)
+    Array([[0., 0.],
+           [0., 0.]], dtype=float32)
+
+    Passing a simple list of arrays concatenates them along the last axis:
+
+    >>> jnp.block([zeros, ones])
+    Array([[0., 0., 1., 1.],
+           [0., 0., 1., 1.]], dtype=float32)
+
+    Passing a doubly-nested list of arrays concatenates the inner list along
+    the last axis, and the outer list along the second-to-last axis:
+
+    >>> jnp.block([[zeros, ones],
+    ...            [twos, threes]])
+    Array([[0., 0., 1., 1.],
+           [0., 0., 1., 1.],
+           [2., 2., 3., 3.],
+           [2., 2., 3., 3.]], dtype=float32)
+
+    Note that blocks need not align in all dimensions, though the size along the axis
+    of concatenation must match. For example, this is valid because after the inner,
+    horizontal concatenation, the resulting blocks have a valid shape for the outer,
+    vertical concatenation.
+
+    >>> a = jnp.zeros((2, 1))
+    >>> b = jnp.ones((2, 3))
+    >>> c = jnp.full((1, 2), 2)
+    >>> d = jnp.full((1, 2), 3)
+    >>> jnp.block([[a, b], [c, d]])
+    Array([[0., 1., 1., 1.],
+           [0., 1., 1., 1.],
+           [2., 2., 3., 3.]], dtype=float32)
+
+    Note also that this logic generalizes to blocks in 3 or more dimensions.
+    Here's a 3-dimensional block-wise array:
+
+    >>> x = jnp.arange(6).reshape((1, 2, 3))
+    >>> blocks = [[[x for i in range(3)] for j in range(4)] for k in range(5)]
+    >>> jnp.block(blocks).shape
+    (5, 8, 9)
+  """
   out, _ = _block(arrays)
   return out
 
@@ -12365,12 +12486,102 @@ def compress(condition: ArrayLike, a: ArrayLike, axis: int | None = None,
   return moveaxis(result, 0, axis)
 
 
-@util.implements(np.cov)
 @partial(jit, static_argnames=('rowvar', 'bias', 'ddof'))
 def cov(m: ArrayLike, y: ArrayLike | None = None, rowvar: bool = True,
         bias: bool = False, ddof: int | None = None,
         fweights: ArrayLike | None = None,
         aweights: ArrayLike | None = None) -> Array:
+  r"""Estimate the weighted sample covariance.
+
+  JAX implementation of :func:`numpy.cov`.
+
+  The covariance :math:`C_{ij}` between variable *i* and variable *j* is defined
+  as
+
+  .. math::
+
+     cov[X_i, X_j] = E[(X_i - E[X_i])(X_j - E[X_j])]
+
+  Given an array of *N* observations of the variables :math:`X_i` and :math:`X_j`,
+  this can be estimated via the sample covariance:
+
+  .. math::
+
+     C_{ij} = \frac{1}{N - 1} \sum_{n=1}^N (X_{in} - \overline{X_i})(X_{jn} - \overline{X_j})
+
+  Where :math:`\overline{X_i} = \frac{1}{N} \sum_{k=1}^N X_{ik}` is the mean of the
+  observations.
+
+  Args:
+    m: array of shape ``(M, N)`` (if ``rowvar`` is True), or ``(N, M)``
+      (if ``rowvar`` is False) representing ``N`` observations of ``M`` variables.
+      ``m`` may also be one-dimensional, representing ``N`` observations of a
+      single variable.
+    y: optional set of additional observations, with the same form as ``m``. If
+      specified, then ``y`` is combined with ``m``, i.e. for the default
+      ``rowvar = True`` case, ``m`` becomes ``jnp.vstack([m, y])``.
+    rowvar: if True (default) then each row of ``m`` represents a variable. If
+      False, then each column represents a variable.
+    bias: if False (default) then normalize the covariance by ``N - 1``. If True,
+      then normalize the covariance by ``N``
+    ddof: specify the degrees of freedom. Defaults to ``1`` if ``bias`` is False,
+      or to ``0`` if ``bias`` is True.
+    fweights: optional array of integer frequency weights of shape ``(N,)``. This
+      is an absolute weight specifying the number of times each observation is
+      included in the computation.
+    aweights: optional array of observation weights of shape ``(N,)``. This is
+      a relative weight specifying the "importance" of each observation. In the
+      ``ddof=0`` case, it is equivalent to assigning probabilities to each
+      observation.
+
+  Returns:
+    A covariance matrix of shape ``(M, M)``.
+
+  See also:
+    - :func:`jax.numpy.corrcoef`: compute the correlation coefficient, a normalized
+      version of the covariance matrix.
+
+  Examples:
+    Consider these observations of two variables that correlate perfectly.
+    The covariance matrix in this case is a 2x2 matrix of ones:
+
+    >>> x = jnp.array([[0, 1, 2],
+    ...                [0, 1, 2]])
+    >>> jnp.cov(x)
+    Array([[1., 1.],
+           [1., 1.]], dtype=float32)
+
+    Now consider these observations of two variables that are perfectly
+    anti-correlated. The covariance matrix in this case has ``-1`` in the
+    off-diagonal:
+
+    >>> x = jnp.array([[-1,  0,  1],
+    ...                [ 1,  0, -1]])
+    >>> jnp.cov(x)
+    Array([[ 1., -1.],
+           [-1.,  1.]], dtype=float32)
+
+    Equivalently, these sequences can be specified as separate arguments,
+    in which case they are stacked before continuing the computation.
+
+    >>> x = jnp.array([-1, 0, 1])
+    >>> y = jnp.array([1, 0, -1])
+    >>> jnp.cov(x, y)
+    Array([[ 1., -1.],
+           [-1.,  1.]], dtype=float32)
+
+    In general, the entries of the covariance matrix may be any positive
+    or negative real value. For example, here is the covariance of 100
+    points drawn from a 3-dimensional standard normal distribution:
+
+    >>> key = jax.random.key(0)
+    >>> x = jax.random.normal(key, shape=(3, 100))
+    >>> with jnp.printoptions(precision=2):
+    ...   print(jnp.cov(x))
+    [[ 1.22 -0.    0.11]
+     [-0.    0.84 -0.1 ]
+     [ 0.11 -0.1   0.88]]
+  """
   if y is not None:
     m, y = util.promote_args_inexact("cov", m, y)
     if y.ndim > 2:
@@ -12433,9 +12644,81 @@ def cov(m: ArrayLike, y: ArrayLike | None = None, rowvar: bool = True,
   return ufuncs.true_divide(dot(X, X_T.conj()), f).squeeze()
 
 
-@util.implements(np.corrcoef)
 @partial(jit, static_argnames=('rowvar',))
 def corrcoef(x: ArrayLike, y: ArrayLike | None = None, rowvar: bool = True) -> Array:
+  r"""Compute the Pearson correlation coefficients.
+
+  JAX implementation of :func:`numpy.corrcoef`.
+
+  This is a normalized version of the sample covariance computed by :func:`jax.numpy.cov`.
+  For a sample covariance :math:`C_{ij}`, the correlation coefficients are
+
+  .. math::
+
+     R_{ij} = \frac{C_{ij}}{\sqrt{C_{ii}C_{jj}}}
+
+  they are constructed such that the values satisfy :math:`-1 \le R_{ij} \le 1`.
+
+  Args:
+    x: array of shape ``(M, N)`` (if ``rowvar`` is True), or ``(N, M)``
+      (if ``rowvar`` is False) representing ``N`` observations of ``M`` variables.
+      ``x`` may also be one-dimensional, representing ``N`` observations of a
+      single variable.
+    y: optional set of additional observations, with the same form as ``m``. If
+      specified, then ``y`` is combined with ``m``, i.e. for the default
+      ``rowvar = True`` case, ``m`` becomes ``jnp.vstack([m, y])``.
+    rowvar: if True (default) then each row of ``m`` represents a variable. If
+      False, then each column represents a variable.
+
+  Returns:
+    A covariance matrix of shape ``(M, M)``.
+
+  See also:
+    - :func:`jax.numpy.cov`: compute the covariance matrix.
+
+  Examples:
+    Consider these observations of two variables that correlate perfectly.
+    The correlation matrix in this case is a 2x2 matrix of ones:
+
+    >>> x = jnp.array([[0, 1, 2],
+    ...                [0, 1, 2]])
+    >>> jnp.corrcoef(x)
+    Array([[1., 1.],
+           [1., 1.]], dtype=float32)
+
+    Now consider these observations of two variables that are perfectly
+    anti-correlated. The correlation matrix in this case has ``-1`` in the
+    off-diagonal:
+
+    >>> x = jnp.array([[-1,  0,  1],
+    ...                [ 1,  0, -1]])
+    >>> jnp.corrcoef(x)
+    Array([[ 1., -1.],
+           [-1.,  1.]], dtype=float32)
+
+    Equivalently, these sequences can be specified as separate arguments,
+    in which case they are stacked before continuing the computation.
+
+    >>> x = jnp.array([-1, 0, 1])
+    >>> y = jnp.array([1, 0, -1])
+    >>> jnp.corrcoef(x, y)
+    Array([[ 1., -1.],
+           [-1.,  1.]], dtype=float32)
+
+    The entries of the correlation matrix are normalized such that they
+    lie within the range -1 to +1, where +1 indicates perfect correlation
+    and -1 indicates perfect anti-correlation. For example, here is the
+    correlation of 100 points drawn from a 3-dimensional standard normal
+    distribution:
+
+    >>> key = jax.random.key(0)
+    >>> x = jax.random.normal(key, shape=(3, 100))
+    >>> with jnp.printoptions(precision=2):
+    ...   print(jnp.corrcoef(x))
+    [[ 1.   -0.    0.1 ]
+     [-0.    1.   -0.12]
+     [ 0.1  -0.12  1.  ]]
+  """
   util.check_arraylike("corrcoef", x)
   c = cov(x, y, rowvar)
   if len(shape(c)) == 0:

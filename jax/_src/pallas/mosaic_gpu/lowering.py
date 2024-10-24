@@ -36,6 +36,7 @@ from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith as arith_dialect
 from jax._src.lib.mlir.dialects import gpu as gpu_dialect
 from jax._src.lib.mlir.dialects import memref as memref_dialect
+from jax._src.lib.mlir.dialects import nvvm as nvvm_dialect
 from jax._src.lib.mlir.dialects import scf as scf_dialect
 from jax._src.pallas import core as pallas_core
 from jax._src.pallas import primitives
@@ -43,7 +44,9 @@ from jax._src.pallas import utils as pallas_utils
 from jax._src.pallas.mosaic_gpu import core as gpu_core
 from jax._src.state import discharge
 from jax._src.state import indexing
+from jax._src.state import types as state_types
 from jax._src.state import primitives as sp
+from jax._src.state.types import RefReshaper
 import jax.experimental.mosaic.gpu as mgpu
 from jax.experimental.mosaic.gpu import core as mgpu_core
 from jax.experimental.mosaic.gpu import utils as mgpu_utils
@@ -866,6 +869,33 @@ def _num_programs_lowering_rule(ctx: LoweringRuleContext, axis):
   )
 
 
+def _handle_reshaping(
+    ref: ir.Value, transforms: Sequence[gpu_core.Transform]
+) -> tuple[ir.Value, Sequence[gpu_core.Transform]]:
+  is_trivial_indexer = lambda t: isinstance(
+      t, indexing.NDIndexer
+  ) and gpu_core.is_trivial_index(t.indices, t.shape)
+
+  last_reshaper_idx = next(
+      reversed([i for i, t in enumerate(transforms) if isinstance(t, RefReshaper)]),
+      None,
+  )
+  if last_reshaper_idx is None:
+    return ref, transforms
+  # Check that before the reshape are only trivial indexes and or
+  # other reshapes.
+  # TODO(cperivol): Reshapes should bubble up  rather than being
+  # expected to effectively be the first ref transform.
+  if not all(isinstance(t, RefReshaper) or is_trivial_indexer(t) for t in transforms[:last_reshaper_idx]):
+    raise NotImplementedError(
+        "Reshapes do not compose with other transforms and indexers must be"
+        f" trivial (transforms: {transforms})"
+    )
+  reshaper = cast(RefReshaper, transforms[last_reshaper_idx])
+  # Skip all the reshapes and trivial indexes.
+  return mgpu.memref_reshape(ref, reshaper.shape), transforms[last_reshaper_idx + 1:]
+
+
 def _handle_indexing(
     ref: ir.Value, transforms: Sequence[gpu_core.Transform]
 ) -> tuple[ir.Value, Sequence[gpu_core.Transform]]:
@@ -916,6 +946,7 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_smem, *leaves, tree):
     raise TypeError(f"Can only load from references (got {x_smem}).")
   x_aval = ctx.avals_in[0]
   transforms = jax.tree.unflatten(tree, leaves)
+  x_smem, transforms = _handle_reshaping(x_smem, transforms)
   x_smem, transforms = _handle_indexing(x_smem, transforms)
   match transforms:
     case (gpu_core.UnswizzleRef(swizzle), gpu_core.UntileRef(tiling)):
@@ -942,6 +973,7 @@ def _swap_lowering_rule(
     raise TypeError(f"Can only store to references (got {x_smem}).")
   x_aval = ctx.avals_in[0]
   transforms = jax.tree.unflatten(tree, leaves)
+  x_smem, transforms = _handle_reshaping(x_smem, transforms)
   x_smem, transforms = _handle_indexing(x_smem, transforms)
   match transforms:
     case (gpu_core.UnswizzleRef(swizzle), gpu_core.UntileRef(tiling)):
@@ -1229,6 +1261,55 @@ def _run_scoped_lowering_rule(
 
   assert len(outs) == len(jaxpr.outvars), (jaxpr, outs)
   return outs
+
+
+@register_lowering_rule(discharge.run_state_p)
+def _run_state_lowering_rule(
+    ctx: LoweringRuleContext,
+    *args,
+    jaxpr: jax_core.Jaxpr,
+    which_linear: tuple[bool, ...],
+    is_initialized: tuple[bool, ...],
+):
+  del which_linear
+  # TODO(apaszke): This should be unified with run_scoped.
+  if not all(is_initialized):
+    raise NotImplementedError("Uninitialized Refs are not supported in lowering of run_state.")
+
+  should_discharge = []
+  new_input_vals = []
+  for arg, v, out_aval in zip(args, jaxpr.invars, ctx.avals_out):
+    aval = v.aval
+    if isinstance(aval, gpu_core.WGMMAAbstractAccumulatorRef):
+      new_input_vals.append(mgpu.WGMMAAccumulator.from_registers(arg))
+      should_discharge.append(True)
+      assert isinstance(out_aval, jax_core.ShapedArray)
+    else:
+      new_input_vals.append(arg)
+      should_discharge.append(not isinstance(out_aval, state_types.AbstractRef))
+  if not any(should_discharge):
+    raise NotImplementedError(
+        "Expected at least one accumulator to in run_state."
+    )
+
+  discharged_jaxpr, new_consts = discharge.discharge_state(
+      jaxpr, (), should_discharge=should_discharge
+  )
+  assert not new_consts
+  outs = lower_jaxpr_to_mosaic_gpu(
+      ctx.module_ctx, ctx.launch_ctx, discharged_jaxpr, new_input_vals, ()
+  )
+  # Await the accumulators and extract their final values.
+  nvvm_dialect.wgmma_wait_group_sync_aligned(0)
+  outs = [
+      out.value if isinstance(out, mgpu.WGMMAAccumulator) else out
+      for out in outs
+  ]
+  # Blend the discharge results with refs we closed over. I don't fully
+  # understand the reasons behind this calling convention, but sharadmv@ has
+  # assured me that this is ok.
+  outs_it = iter(outs)
+  return [next(outs_it) if d else a for d, a in zip(should_discharge, args)]
 
 
 def _lower_jaxpr_to_for_loop(
