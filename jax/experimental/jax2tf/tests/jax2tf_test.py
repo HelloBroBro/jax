@@ -79,7 +79,7 @@ class Jax2TfTest(tf_test_util.JaxToTfTestCase):
   def setUp(self):
     super().setUp()
     self.warning_ctx = jtu.ignore_warning(
-        message="jax2tf.convert with native_serialization=False is deprecated"
+        message="jax2tf.convert with native_serialization=False has been deprecated"
     )
     self.warning_ctx.__enter__()
 
@@ -1692,8 +1692,8 @@ class Jax2TfTest(tf_test_util.JaxToTfTestCase):
 
   def test_dot_algorithm(self):
     # ref: https://github.com/jax-ml/jax/issues/24236
-    if tf.version.VERSION.split(".") <= ["2", "17", "0"]:
-      self.skipTest("This test works only with newer versions of TF")
+    if tf.version.VERSION.split(".") <= ["2", "18", "0"]:
+      self.skipTest("Because of an XLA bug this test segfaults with TF v2.18.0")
 
     if jtu.test_device_matches(["tpu"]):
       algorithm = "BF16_BF16_F32"
@@ -1721,7 +1721,7 @@ class Jax2tfWithCustomPRNGTest(tf_test_util.JaxToTfTestCase):
   def setUp(self):
     super().setUp()
     self.warning_ctx = jtu.ignore_warning(
-        message="jax2tf.convert with native_serialization=False is deprecated"
+        message="jax2tf.convert with native_serialization=False has been deprecated"
     )
     self.warning_ctx.__enter__()
 
@@ -1762,7 +1762,7 @@ class Jax2TfVersioningTest(tf_test_util.JaxToTfTestCase):
     super().setUp()
 
   @jtu.ignore_warning(
-      message="jax2tf.convert with native_serialization=False is deprecated"
+      message="jax2tf.convert with native_serialization=False has been deprecated"
   )
   def test_simple(self):
     self.ConvertAndCompare(jnp.sin, 0.7)

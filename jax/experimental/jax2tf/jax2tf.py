@@ -119,6 +119,10 @@ def _sanitize_scope_name(name):
 # Line below is different externally and internally.
 allow_enable_xla_false = lambda: True
 
+# TODO(b/353437398): Deprecate support for `native_serialization=False`.
+# Line below is different externally and internally.
+allow_native_serialization_false = lambda: True
+
 # A value suitable in a TF tracing context: tf.Tensor, tf.Variable,
 # or Python scalar or numpy.ndarray. (A tf.EagerTensor is a tf.Tensor.)
 TfVal = Any
@@ -294,8 +298,8 @@ def convert(fun_jax: Callable,
       See [the README](https://github.com/jax-ml/jax/blob/main/jax/experimental/jax2tf/README.md#shape-polymorphic-conversion)
       for more details.
 
-    polymorphic_constraints: a sequence of contraints on symbolic dimension expressions, of
-      the form `e1 >= e2` or `e1 <= e2`.
+    polymorphic_constraints: a sequence of constraints on symbolic dimension
+      expressions, of the form `e1 >= e2` or `e1 <= e2`.
       See more details at https://github.com/jax-ml/jax/blob/main/jax/experimental/jax2tf/README.md#user-specified-symbolic-constraints.
     with_gradient: if set (default), add a tf.custom_gradient to the lowered
       function, by converting the ``jax.vjp(fun)``. This means that reverse-mode
@@ -332,28 +336,38 @@ def convert(fun_jax: Callable,
     tuple/lists/dicts thereof), and returns TfVals as outputs, and uses
     only TensorFlow ops and thus can be called from a TensorFlow program.
   """
-  if not enable_xla:
-    if allow_enable_xla_false():
-      warnings.warn("jax2tf.convert with enable_xla=False is deprecated.",
-                    DeprecationWarning,
-                    stacklevel=2)
-    else:
-      raise ValueError("jax2tf.convert with enable_xla=False is not supported.")
-
   if native_serialization is DEFAULT_NATIVE_SERIALIZATION:
     if not enable_xla:
       native_serialization = False
     else:
       native_serialization = config.jax2tf_default_native_serialization.value
 
-  if not native_serialization:
-    warnings.warn(
-        "jax2tf.convert with native_serialization=False is deprecated.",
-        DeprecationWarning,
-        stacklevel=2)
-  if native_serialization and not enable_xla:
-    raise ValueError(
-        "native_serialization is not supported with enable_xla=False")
+  if not enable_xla:
+    if allow_enable_xla_false():
+      warnings.warn(
+          "jax2tf.convert with enable_xla=False has been deprecated "
+          "since July 2024.",
+          DeprecationWarning,
+          stacklevel=2)
+      if native_serialization:
+        raise ValueError(
+            "native_serialization is not supported with enable_xla=False")
+    else:
+      raise ValueError(
+          "jax2tf.convert with enable_xla=False has been deprecated "
+          "since July 2024 and it is not supported anymore.")
+
+  elif not native_serialization:
+    if allow_native_serialization_false():
+      warnings.warn(
+          "jax2tf.convert with native_serialization=False has been deprecated "
+          "since July 2024.",
+          DeprecationWarning,
+          stacklevel=2)
+    else:
+      raise ValueError(
+          "jax2tf.convert with native_serialization=False has been deprecated "
+          "since July 2024 and it is not supported anymore.")
 
   if not native_serialization and polymorphic_constraints:
     raise ValueError(
@@ -1686,8 +1700,37 @@ tf_impl[lax.sin_p] = tf.math.sin
 tf_impl[lax.sinh_p] = tf.math.sinh
 tf_impl[lax.cos_p] = tf.math.cos
 tf_impl[lax.cosh_p] = tf.math.cosh
-tf_impl_with_avals[lax.acos_p] = _convert_jax_impl(
-    lax_internal.acos_impl, multiple_results=False)
+
+
+def _acos_impl(x):
+  if x.dtype.is_complex:
+    result = tf.multiply(tf.constant(1j, dtype=x.dtype), tf.math.acosh(x))
+    # By convention, numpy chooses the branch with positive real part.
+    rpart = tf.math.real(result)
+    return tf.where(
+        tf.math.greater(rpart, tf.constant(0, dtype=rpart.dtype)),
+        result,
+        tf.math.negative(result),
+    )
+  else:
+    return tf.where(
+        tf.math.not_equal(x, tf.constant(-1.0, dtype=x.dtype)),
+        tf.multiply(
+            tf.constant(2, dtype=x.dtype),
+            tf.math.atan2(
+                tf.math.sqrt(
+                    tf.math.subtract(
+                        tf.constant(1, dtype=x.dtype), tf.math.square(x)
+                    )
+                ),
+                tf.math.add(tf.constant(1, dtype=x.dtype), x),
+            ),
+        ),
+        tf.broadcast_to(tf.constant(np.pi, dtype=x.dtype), tf.shape(x)),
+    )
+
+
+tf_impl_with_avals[lax.acos_p] = _acos_impl
 tf_impl_with_avals[lax.asin_p] = _convert_jax_impl(
     lax_internal.asin_impl, multiple_results=False)
 tf_impl_with_avals[lax.atan_p] = _convert_jax_impl(
@@ -2188,7 +2231,7 @@ def _dot_general(lhs, rhs, *, dimension_numbers,
                  _out_aval: core.ShapedArray):
   """Implementation of lax.dot_general_p in terms of tf.linalg.einsum."""
   # TODO(b/293247337): we ought to turn on this safety check, but this leads to
-  # failures. Since we are going to turn on native serializaton soon, wait
+  # failures. Since we are going to turn on native serialization soon, wait
   # until then to turn on this check.
   # lhs_aval, rhs_aval = _in_avals
   # if lhs_aval.dtype != rhs_aval.dtype:
@@ -2253,7 +2296,7 @@ def _dot_general_convert_to_common_dtype(
     convert_result = lambda res: res
   return (lhs, rhs, convert_result)
 
-def _broadcast_in_dim(operand, *, shape, broadcast_dimensions,
+def _broadcast_in_dim(operand, *, shape, broadcast_dimensions, sharding=None,
                       _in_avals: Sequence[core.ShapedArray],
                       _out_aval: core.ShapedArray):
   # for i in range(len(operand.shape)):
@@ -3523,7 +3566,7 @@ def split_to_logical_devices(tensor: TfVal,
 def _xla_compatible_sharding_to_hlo_sharding(
     s: sharding.Sharding,
     aval: core.ShapedArray) -> xla_client.HloSharding | None:
-  if sharding_impls.is_unspecified(s):
+  if isinstance(s, sharding_impls.UnspecifiedValue):
     return None
   return s._to_xla_hlo_sharding(aval.ndim)
 
