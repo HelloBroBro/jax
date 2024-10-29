@@ -293,7 +293,6 @@ jax_multiplatform_test(
         "gpu": ["noasan"],  # Memory leaks in NCCL, see https://github.com/NVIDIA/nccl/pull/1143
     },
     enable_backends = ["gpu"],
-    env = {"XLA_FLAGS": "--xla_dump_to=sponge --xla_gpu_enable_latency_hiding_scheduler=true"},
     tags = [
         "config-cuda-only",
         "multiaccelerator",
@@ -1343,6 +1342,14 @@ jax_multiplatform_test(
     srcs = ["attrs_test.py"],
     deps = [
         "//jax:experimental",
+    ],
+)
+
+jax_multiplatform_test(
+    name = "colocated_python_test",
+    srcs = ["colocated_python_test.py"],
+    deps = [
+        "//jax:experimental_colocated_python",
     ],
 )
 

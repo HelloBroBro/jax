@@ -430,6 +430,32 @@ class FragmentedArray:
       return NotImplemented
     return self._pointwise(lambda s, o: arith.divf(o, s), other)
 
+  def __floordiv__(self, other):
+    if ir.FloatType.isinstance(self.mlir_dtype):
+      return self._pointwise(
+          lambda s, o: mlir_math.floor(arith.divf(s, o)), other
+      )
+    elif ir.IntegerType.isinstance(self.mlir_dtype):
+      if self.is_signed:
+        return self._pointwise(arith.floordivsi, other)
+      else:
+        return self._pointwise(arith.divui, other)
+    else:
+      return NotImplemented
+
+  def __rfloordiv__(self, other):
+    if ir.FloatType.isinstance(self.mlir_dtype):
+      return self._pointwise(
+          lambda s, o: mlir_math.floor(arith.divf(o, s)), other
+      )
+    elif ir.IntegerType.isinstance(self.mlir_dtype):
+      if self.is_signed:
+        return self._pointwise(lambda s, o: arith.floordivsi(o, s), other)
+      else:
+        return self._pointwise(lambda s, o: arith.divui(o, s), other)
+    else:
+      return NotImplemented
+
   def __mod__(self, other):
     if not ir.IntegerType.isinstance(self.mlir_dtype):
       return NotImplemented
@@ -571,7 +597,8 @@ class FragmentedArray:
       elif ir.VectorType.isinstance(x.type):
         index = ir.IndexType.get()
         result = llvm.mlir_undef(x.type)
-        for i in range(2):
+        [vec_len] = ir.VectorType(x.type).shape
+        for i in range(vec_len):
           v = vector.extractelement(x, position=c(i, index))
           vr = fast_instr(v)
           result = vector.insertelement(vr, result, position=c(i, index))
