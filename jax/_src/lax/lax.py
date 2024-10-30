@@ -60,7 +60,6 @@ from jax._src.lax import slicing
 from jax._src.lax.utils import (
   _input_dtype, dtype_to_string, standard_abstract_eval,
   standard_multi_result_abstract_eval, standard_primitive)
-from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import chlo
 from jax._src.lib.mlir.dialects import hlo
@@ -1759,6 +1758,9 @@ def stop_gradient(x: T) -> T:
       return x
     elif (dtypes.issubdtype(_dtype(x), np.floating) or
         dtypes.issubdtype(_dtype(x), np.complexfloating)):
+      # break abstractions to support legacy leaked tracer use cases
+      if isinstance(x, ad.JVPTracer):
+        return stop(x.primal)
       return ad_util.stop_gradient_p.bind(x)
     else:
       return x
@@ -2385,21 +2387,9 @@ cos_p = standard_unop(_float | _complex, 'cos')
 ad.defjvp(cos_p, lambda g, x: neg(mul(g, sin(x))))
 mlir.register_lowering(cos_p, _cos_lowering)
 
-@_upcast_fp16_for_computation
-def _tan_impl(x):
-  return div(sin(x), cos(x))
-
 tan_p = standard_unop(_float | _complex, 'tan')
 ad.defjvp2(tan_p, lambda g, ans, x: mul(g, _const(x, 1) + square(ans)))
-# TODO(b/368011034): Remove after jaxlib 0.4.34 release. In 0.4.33, this
-# lowering is mostly supported, but it fails on export or with the PJRT plugin
-# because those modes target an older StableHLO version, and the
-# compatibility updates from https://github.com/openxla/xla/pull/16649 aren't
-# included in the 0.4.33 release.
-if jaxlib_version <= (0, 4, 33):
-  mlir.register_lowering(tan_p, partial(_nary_lower_hlo, chlo.tan))
-else:
-  mlir.register_lowering(tan_p, partial(_nary_lower_hlo, hlo.tan))
+mlir.register_lowering(tan_p, partial(_nary_lower_hlo, hlo.tan))
 
 def asin_impl(x):
   if dtypes.issubdtype(_dtype(x), np.complexfloating):
@@ -2979,14 +2969,18 @@ def _convert_elt_type_pp_rule(eqn, context, settings):
   return core._pp_eqn(eqn.replace(params=params), context, settings)
 
 convert_element_type_p = Primitive('convert_element_type')
-def _convert_element_type_bind(operand, *, new_dtype, weak_type, sharding):
-  operand = core.Primitive.bind(convert_element_type_p, operand,
-                                new_dtype=new_dtype, weak_type=weak_type,
-                                sharding=sharding)
+
+# TODO(dougalm): I'm overriding bind_with_trace here because that's the closest thing to
+# the old "custom bind" but it might not be the best way to do this.
+def _convert_element_type_bind_with_trace(trace, args, params):
+  sharding = params['sharding']
+  operand = core.Primitive.bind_with_trace(convert_element_type_p, trace, args, params)
   if sharding is not None and not config.sharding_in_types.value:
-    operand = pjit.with_sharding_constraint(operand, sharding)
+    with core.set_current_trace(trace):
+      operand = pjit.with_sharding_constraint(operand, sharding)
   return operand
-convert_element_type_p.def_custom_bind(_convert_element_type_bind)
+convert_element_type_p.def_bind_with_trace(_convert_element_type_bind_with_trace)
+
 convert_element_type_p.def_impl(partial(dispatch.apply_primitive, convert_element_type_p))
 convert_element_type_p.def_abstract_eval(
     partial(standard_abstract_eval, convert_element_type_p,
