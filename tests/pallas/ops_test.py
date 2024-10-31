@@ -29,6 +29,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 from jax import random
+from jax._src import config
 from jax._src import dtypes
 from jax._src import linear_util as lu
 from jax._src import state
@@ -721,6 +722,28 @@ class OpsTest(PallasBaseTest):
         expected.astype(jnp.float32),
     )
 
+  # TODO(twsung): Add more types once lowering is implemented.
+  @parameterized.parameters(
+      jnp.float32,
+      jnp.bfloat16,
+      jnp.int32,
+  )
+  def test_add_constant(self, dtype):
+
+    shape = (256, 256)
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+    )
+    def kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...] + 1
+
+    np.testing.assert_array_equal(
+        kernel(jnp.zeros(shape, dtype=dtype)),
+        jnp.ones(shape, dtype=dtype),
+    )
+
   @parameterized.parameters(
       -3.2, -1.0, -0.999517, -0.4, 0., 0.72, 0.999517, 1.0, 2.4,
   )
@@ -839,16 +862,6 @@ class OpsTest(PallasBaseTest):
     ):
       self.skipTest(
           "Scalar population count on TPU is only supported in interpret mode"
-      )
-
-    if (
-        jtu.test_device_matches(["tpu"])
-        and fn == jnp.abs
-        and jnp.issubdtype(dtype, jnp.integer)
-        and not self.INTERPRET
-    ):
-      self.skipTest(
-          "Scalar abs for integers on TPU is only supported in interpret mode"
       )
 
     # TODO(b/370578663): implement these lowerings on TPU
@@ -1229,6 +1242,8 @@ class OpsTest(PallasBaseTest):
       "plgpu.TritonCompilerParams unavailable on Windows",
   )
   def test_debug_print(self):
+    if config.use_shardy_partitioner.value:
+      self.skipTest("TODO(b/364547005): pure callbacks not supported by Shardy yet")
     if jtu.test_device_matches(["tpu"]):
       self.skipTest("Not supported on TPU")
 
@@ -1884,11 +1899,35 @@ class OpsTest(PallasBaseTest):
       y_ref = jnp.cumsum(x, axis=axis)
       np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2, err_msg=i)
 
+  @parameterized.parameters(
+      (0, jnp.float32),
+      (0, jnp.bfloat16),
+      (1, jnp.float32),
+      (1, jnp.bfloat16),
+      (-1, jnp.float32),
+      (-1, jnp.bfloat16),
+  )
+  def test_triu(self, k, dtype):
+    if dtype == jnp.bfloat16 and jtu.test_device_matches(["tpu"]):
+      # TODO(mvoz): b/376330700
+      raise unittest.SkipTest('NYI - bf16 select')
+
+    x = jnp.arange(128 * 256, dtype=dtype).reshape((128, 256))
+
+    def kernel(x_ref, out_ref):
+      out_ref[...] = jnp.triu(x_ref[...], k=k)
+
+    out = self.pallas_call(
+        kernel, out_shape=jax.ShapeDtypeStruct((128, 256), dtype)
+    )(x)
+    np.testing.assert_array_equal(out, np.triu(x, k=k))
 
 class OpsInterpretTest(OpsTest):
   INTERPRET = True
 
   def test_debug_print(self):
+    if config.use_shardy_partitioner.value:
+      self.skipTest("TODO(b/364547005): pure callbacks not supported by Shardy yet")
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
