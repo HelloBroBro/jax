@@ -151,6 +151,7 @@ def jit(
   backend: str | None = None,
   inline: bool = False,
   abstracted_axes: Any | None = None,
+  compiler_options: dict[str, Any] | None = None,
 ) -> pjit.JitWrapped:
   """Sets up ``fun`` for just-in-time compilation with XLA.
 
@@ -280,7 +281,7 @@ def jit(
   return pjit.make_jit(
         fun, in_shardings, out_shardings, donate_argnums, donate_argnames,
         static_argnums, static_argnames, device, backend, abstracted_axes,
-        keep_unused, inline, use_resource_env=False)
+        keep_unused, inline, compiler_options, use_resource_env=False)
 
 
 @contextmanager
@@ -2183,11 +2184,12 @@ def make_jaxpr(
 
 def _infer_src_sharding(src, x) -> Sharding | None:
   if src is not None:
-    # TODO(slebedev): This looks like an error and needs investigation.
     return src  # pytype: disable=bad-return-type
   if isinstance(x, array.ArrayImpl):
     return x.sharding
-  elif isinstance(x, core.Tracer):
+  if config.sharding_in_types.value and hasattr(x, 'sharding'):
+    return x.sharding
+  if isinstance(x, core.Tracer):
     val = x.to_concrete_value()
     if val is not None and isinstance(val, array.ArrayImpl):
       return val.sharding
