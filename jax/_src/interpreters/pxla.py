@@ -723,7 +723,6 @@ def stage_parallel_callable(
       jaxpr, out_sharded_avals, consts, _ = pe.trace_to_jaxpr_dynamic(
           fun, sharded_avals, pe.debug_info_final(fun, "pmap"))
   jaxpr = api_util.jaxpr_debug_info(jaxpr, orig_fun.debug_info)
-  jaxpr = dispatch.apply_outfeed_rewriter(jaxpr)
 
   assert len(out_sharded_avals) == len(pci.out_axes), (
       len(out_sharded_avals), len(pci.out_axes))
@@ -1354,6 +1353,8 @@ def _pmap_partial_eval_custom_res_maker(params_known, aval):
 
 def _pmap_dce_rule(used_outputs, eqn):
   # just like pe.dce_jaxpr_call_rule, except handles in_axes / out_axes
+  if not any(used_outputs) and not pe.has_effects(eqn):
+    return [False] * len(eqn.invars), None
   axis_name = eqn.params["axis_name"]
   with core.extend_axis_env_nd([(axis_name, eqn.params["global_axis_size"])]):
     new_jaxpr, used_inputs = pe.dce_jaxpr(eqn.params['call_jaxpr'], used_outputs)
@@ -1783,7 +1784,6 @@ def _dce_jaxpr(closed_jaxpr, api_name, fun_name,
     donated_invars = tuple(x for i, x in enumerate(donated_invars) if i in kept_var_idx)
     del kept_const_idx
 
-  jaxpr = dispatch.apply_outfeed_rewriter(jaxpr)
   closed_jaxpr = core.ClosedJaxpr(jaxpr, consts)
   return closed_jaxpr, donated_invars, kept_var_idx, name_stack
 
