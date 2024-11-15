@@ -2204,14 +2204,8 @@ def multi_sharding_in_dim(ctx, ops, in_avals, out_aval):
     if in_aval.sharding == out_aval.sharding or in_aval.sharding is None:
       out.append(op)
     else:
-      # TODO(yashkatariya, dougalm): If `in_aval.sharding` contains
-      # CompilerShardingAxis, then specify `unspecified_dims` via
-      # `wrap_with_sharding_op`.
-      if config.use_shardy_partitioner.value:
-        sp = in_aval.sharding._to_sdy_sharding(in_aval.ndim)
-      else:
-        sp = in_aval.sharding._to_xla_hlo_sharding(in_aval.ndim).to_proto()
-      out.append(mlir.wrap_with_sharding_op(ctx, op, out_aval, sp))
+      proto = in_aval.sharding._to_xla_hlo_sharding(in_aval.ndim).to_proto()
+      out.append(mlir.lower_sharding_under_shit(ctx, op, out_aval, proto))
   return out
 
 
@@ -2227,11 +2221,7 @@ def _nary_lower_hlo(op: Callable, ctx,
 
   out = op(*args)
   if config.sharding_in_types.value:
-    if config.use_shardy_partitioner.value:
-      out_sp = aval_out.sharding._to_sdy_sharding(aval_out.ndim)
-    else:
-      out_sp = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, out_sp)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   else:
     return [out]
 
@@ -2633,24 +2623,23 @@ def _integer_pow(x, *, y):
 def _integer_pow_lowering(ctx, x, *, y):
   # These cases are subsumed by the general case, but it's faster to emit these
   # common cases directly.
-  if y == 2:
+  if y == 1:
+    out = x
+  elif y == 2:
     out = hlo.multiply(x, x)
   elif y == 3:
     out = hlo.multiply(hlo.multiply(x, x), x)
+  elif y == -1:
+    out = hlo.divide(mlir.full_like_aval(ctx, 1, ctx.avals_in[0]), x)
   else:
     lowering = mlir.lower_fun(_integer_pow, multiple_results=False)
-    # TODO(b/217551391): emitting an out-of-line call leads to a large
-    # expansion when the MLIR is lowered to HLO, because the HLO lowering
-    # clones the callee. Consider unconditionally caching when the MLIR->HLO
-    # lowering doesn't expand the program.
-    lowering = mlir.cache_lowering(lowering)
-    out = lowering(ctx, x, y=y)
+    if builtins.abs(y) >= 3:
+      lowering = mlir.cache_lowering(lowering)
+    out, = lowering(ctx, x, y=y)
   if config.sharding_in_types.value:
     aval_out, = ctx.avals_out
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    out = out[0] if isinstance(out, list) else out
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
-  return out if isinstance(out, list) else [out]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
+  return [out]
 
 mlir.register_lowering(integer_pow_p, _integer_pow_lowering)
 
@@ -3031,8 +3020,7 @@ def _convert_element_type_lower(ctx, operand, *, new_dtype, weak_type,
   if config.sharding_in_types.value:
     if sharding is not None:
       assert aval_out.sharding == sharding
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   return [out]
 
 mlir.register_lowering(convert_element_type_p, _convert_element_type_lower)
@@ -3767,8 +3755,7 @@ def _dot_general_lower(ctx, lhs, rhs, *, dimension_numbers,
   if config.sharding_in_types.value:
     if out_type is not None:
       assert aval_out.sharding == out_type
-    out_sp = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    result = mlir.wrap_with_sharding_op(ctx, result, aval_out, out_sp)
+    result = mlir.lower_sharding_under_shit(ctx, result, aval_out)
   if accumulation_aval.dtype != aval_out.dtype:
     result = mlir.convert_hlo(ctx, result, accumulation_aval, aval_out)
   return [result]
@@ -4233,8 +4220,7 @@ def _broadcast_in_dim_lower(ctx, x, *dyn_shape, shape, broadcast_dimensions,
   if config.sharding_in_types.value:
     if sharding is not None:
       assert sharding == aval_out.sharding
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   return [out]
 
 def _broadcast_in_dim_abstract_eval(x, *dyn_shape, shape, broadcast_dimensions,
@@ -4647,8 +4633,7 @@ def _reshape_lower(ctx, x, *dyn_shape, new_sizes, dimensions):
     aval_out = aval_out.update(shape=_merge_dyn_shape(new_sizes, dyn_shape))
   out = mlir.reshape(ctx, x, aval_out)
   if config.sharding_in_types.value:
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   return [out]
 
 def _reshape_staging_rule(
@@ -4728,8 +4713,7 @@ def _transpose_lower(ctx, x, *, permutation):
     permutation = [*permutation, *trailing_dims]
   out = hlo.transpose(x, mlir.dense_int_array(permutation))
   if config.sharding_in_types.value:
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   return [out]
 
 transpose_p = standard_primitive(
@@ -4870,8 +4854,7 @@ def _select_hlo_lowering_opaque(ctx, which, *cases):
 
 def _add_shit_to_select(ctx, op, aval_out):
   if config.sharding_in_types.value:
-    proto = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return mlir.wrap_with_sharding_op(ctx, op, aval_out, proto)
+    return mlir.lower_sharding_under_shit(ctx, op, aval_out)
   return op
 
 def _select_hlo_lowering(ctx, which, *cases):
@@ -5243,8 +5226,7 @@ def _unary_reduce_lower(reducer, unit_factory, ctx, x, *, axes):
   with ir.InsertionPoint(reducer_region):
     hlo.return_([reducer(*reducer_region.arguments)])
   if config.sharding_in_types.value:
-    out_sp = aval_out.sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, op.result, aval_out, out_sp)]
+    return [mlir.lower_sharding_under_shit(ctx, op.result, aval_out)]
   return op.results
 
 mlir.register_lowering(reduce_sum_p, partial(_unary_reduce_lower, hlo.AddOp,
@@ -5943,8 +5925,7 @@ def _iota_lower(ctx, *dyn_shape, dtype, shape, dimension, sharding):
   out = mlir.iota(ctx, aval_out, dimension=dimension)
   if config.sharding_in_types.value:
     assert aval_out.sharding == sharding
-    proto = sharding._to_xla_hlo_sharding(aval_out.ndim).to_proto()
-    return [mlir.wrap_with_sharding_op(ctx, out, aval_out, proto)]
+    return [mlir.lower_sharding_under_shit(ctx, out, aval_out)]
   return [out]
 mlir.register_lowering(iota_p, _iota_lower)
 

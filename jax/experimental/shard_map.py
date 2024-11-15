@@ -46,11 +46,12 @@ from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import util
 from jax._src.core import Tracer
-from jax._src.mesh import AbstractMesh, Mesh
+from jax._src.mesh import AbstractMesh, Mesh, AxisTypes
 from jax._src.api import _shared_code_pmap, _prepare_pmap
 from jax._src.lax import (lax, parallel as lax_parallel, slicing,
                           windowed_reductions, convolution, fft, linalg,
                           special, control_flow, ann)
+from jax._src.extend import ffi
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import sdy
 from jax._src.util import (HashableFunction, HashablePartial, unzip2,
@@ -528,17 +529,30 @@ def _unshard_aval(mesh: Mesh, names: AxisNames, aval: core.AbstractValue
     raise NotImplementedError(f"Unsupported aval type: {type(aval)}")
 
 def _shard_shaped_array(mesh: Mesh, names: AxisNames, aval: core.AbstractValue
-                       ) -> core.AbstractValue:
+                        ) -> core.AbstractValue:
   assert isinstance(aval, core.ShapedArray)
-  return aval.update(tuple(sz // prod(mesh.shape[n] for n in names.get(i, ()))
-                            for i, sz in enumerate(aval.shape)))
+  new_shape = tuple(sz // prod(mesh.shape[n] for n in names.get(i, ()))
+                    for i, sz in enumerate(aval.shape))
+  if config.sharding_in_types.value:
+    new_mesh = AbstractMesh(
+        mesh.shape_tuple, {AxisTypes.Collective: mesh.axis_names})
+    new_sharding = NamedSharding(new_mesh, P(*[None] * aval.ndim))
+  else:
+    new_sharding = None
+  return aval.update(shape=new_shape, sharding=new_sharding)
 core.shard_aval_handlers[core.ShapedArray] = _shard_shaped_array
 
 def _unshard_shaped_array(mesh: Mesh, names: AxisNames,
                           aval: core.AbstractValue,) -> core.AbstractValue:
   assert isinstance(aval, core.ShapedArray)
-  return aval.update(tuple(sz * prod(mesh.shape[n] for n in names.get(i, ()))
-                            for i, sz in enumerate(aval.shape)))
+  new_shape = tuple(sz * prod(mesh.shape[n] for n in names.get(i, ()))
+                    for i, sz in enumerate(aval.shape))
+  if config.sharding_in_types.value:
+    spec = _names_to_pspec(names)._normalized_spec(aval.ndim)
+    new_sharding = NamedSharding(AbstractMesh(mesh.shape_tuple), spec)
+  else:
+    new_sharding = None
+  return aval.update(shape=new_shape, sharding=new_sharding)
 core.unshard_aval_handlers[core.ShapedArray] = _unshard_shaped_array
 
 # Type-checking
@@ -1277,29 +1291,37 @@ def _scan_rewrite(mesh, in_rep, *args, jaxpr, num_consts, num_carry, **params):
 @register_check(control_flow.conditionals.cond_p)
 def _cond_rule(mesh, *in_rep, branches):
   _, *args_rep = in_rep
-  true_out_rep = _check_rep(mesh, branches[0].jaxpr, args_rep)
-  false_out_rep = _check_rep(mesh, branches[1].jaxpr, args_rep)
-  if not true_out_rep == false_out_rep:
-    raise Exception("The true and false branches of cond produced mismatched "
-                    f"replication types {true_out_rep} and {false_out_rep}. "
-                    "Please open an issue at "
-                    "https://github.com/jax-ml/jax/issues, and as a temporary "
-                    "workaround pass the check_rep=False argument to shard_map")
-  return true_out_rep
+  out_rep = _check_rep(mesh, branches[0].jaxpr, args_rep)
+  for branch in branches[1:]:
+    out_rep_ = _check_rep(mesh, branch.jaxpr, args_rep)
+    if not out_rep_ == out_rep:
+      raise Exception("The branches of cond produced mismatched replication "
+                      "types. Please open an issue at "
+                      "https://github.com/jax-ml/jax/issues, and as a "
+                      "temporary workaround pass the check_rep=False argument "
+                      "to shard_map")
+  return out_rep
 
 @register_rewrite(control_flow.conditionals.cond_p)
 def _cond_rewrite(mesh, in_rep, *args, branches):
   pred_rep, *args_rep = in_rep
-  _, true_out_rep = _replication_rewrite_nomatch(mesh, branches[0], args_rep)
-  _, false_out_rep = _replication_rewrite_nomatch(mesh, branches[1], args_rep)
-  out_rep = map(op.and_, true_out_rep, false_out_rep)
+  _, out_rep = _replication_rewrite_nomatch(mesh, branches[0], args_rep)
+  for branch in branches[1:]:
+    _, out_rep_ = _replication_rewrite_nomatch(mesh, branch, args_rep)
+    if out_rep:
+      out_rep = map(op.and_, out_rep, out_rep_)
+    else:
+      out_rep = out_rep_
   out_rep = map(partial(op.and_, pred_rep), out_rep)
-  branches_ = (
-      _replication_rewrite_match(mesh, branches[0], args_rep, out_rep),
-      _replication_rewrite_match(mesh, branches[1], args_rep, out_rep),
-  )
+  branches_ = tuple(_replication_rewrite_match(mesh, branch, args_rep, out_rep)
+                    for branch in branches)
   out_vals = control_flow.conditionals.cond_p.bind(*args, branches=branches_)
   return out_vals, out_rep
+
+@register_check(control_flow.conditionals.platform_index_p)
+def _platform_index_rule(mesh, *_, **__):
+  return set(mesh.axis_names)
+register_norewrite(control_flow.conditionals.platform_index_p)
 
 @register_rewrite(core.closed_call_p)
 def _closed_call_rewrite(mesh, in_rep, *args, call_jaxpr, **kwargs):
@@ -1350,20 +1372,17 @@ def _custom_vjp_call_jaxpr_rewrite(
 def _custom_vjp_call_jaxpr_check(mesh, *in_rep, fun_jaxpr, **_):
   return _check_rep(mesh, fun_jaxpr.jaxpr, in_rep)
 
-
-# TODO(mattjj): make standard_check handle multiple outputs, share code
 @register_check(control_flow.solves.linear_solve_p)
-def _linear_solve_check(mesh, *in_rep, const_lengths, jaxprs):
-  in_rep_ = [r for r in in_rep if r is not None]
-  assert in_rep
-  if not in_rep_[:-1] == in_rep_[1:]:
-    msg = ("shard_map check_rep rewrite failed. Please open an issue at "
-           "https://github.com/jax-ml/jax/issues and as a workaround pass the "
-           "check_rep=False argument to shard_map")
-    raise Exception(msg)
-  return [in_rep_[0]] * len(jaxprs.solve.out_avals)
+def _linear_solve_check(mesh, *in_rep, jaxprs, **_):
+  out_rep = _standard_check(control_flow.solves.linear_solve_p, mesh, *in_rep)
+  return [out_rep] * len(jaxprs.solve.out_avals)
 register_standard_rewrite(control_flow.solves.linear_solve_p)
 
+@register_check(ffi.ffi_call_p)
+def _ffi_call_check(mesh, *in_rep, result_avals, **_):
+  out_rep = _standard_check(ffi.ffi_call_p, mesh, *in_rep)
+  return [out_rep] * len(result_avals)
+register_standard_rewrite(ffi.ffi_call_p)
 
 del _check_rules[lax.tie_p]
 

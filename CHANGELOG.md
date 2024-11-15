@@ -43,6 +43,7 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
   * {func}`jax.scipy.linalg.toeplitz` now does implicit batching on multi-dimensional
     inputs. To recover the previous behavior, you can call {func}`jax.numpy.ravel`
     on the function inputs.
+  * `jax.clear_backends` was removed after being deprecated in v0.4.26.
 
 * New Features
   * {func}`jax.jit` got a new `compiler_options: dict[str, Any]` argument, for
@@ -51,6 +52,7 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
   * {func}`jax.tree_util.register_dataclass` now allows metadata fields to be
     declared inline via {func}`dataclasses.field`. See the function documentation
     for examples.
+  * Added {func}`jax.numpy.put_along_axis`.
 
 * Bug fixes
   * Fixed a bug where the GPU implementations of LU and QR decomposition would
