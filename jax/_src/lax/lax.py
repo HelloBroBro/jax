@@ -946,11 +946,15 @@ class DotAlgorithmPreset(enum.Enum):
           DotAlgorithmPreset.ANY_F8_ANY_F8_ANY |
           DotAlgorithmPreset.ANY_F8_ANY_F8_ANY_FAST_ACCUM
       ):
-        fp8_dtypes = (np.dtype(dtypes.float8_e4m3b11fnuz),
+        fp8_dtypes = [np.dtype(dtypes.float8_e4m3b11fnuz),
                       np.dtype(dtypes.float8_e4m3fn),
                       np.dtype(dtypes.float8_e4m3fnuz),
                       np.dtype(dtypes.float8_e5m2),
-                      np.dtype(dtypes.float8_e5m2fnuz))
+                      np.dtype(dtypes.float8_e5m2fnuz)]
+        if dtypes.float8_e3m4 is not None:
+          fp8_dtypes += [np.dtype(dtypes.float8_e3m4)]
+        if dtypes.float8_e4m3 is not None:
+          fp8_dtypes += [np.dtype(dtypes.float8_e4m3)]
         if lhs_dtype not in fp8_dtypes or rhs_dtype not in fp8_dtypes:
           raise ValueError(
               f"The dot algorithm '{self}' requires both inputs to have float8 "
@@ -2092,11 +2096,11 @@ def broadcasting_sharding_rule(name, *avals):
   mesh = None
   for a in avals:
     if a.sharding is not None:
-      mesh = a.sharding.mesh
       if mesh is not None and mesh != a.sharding.mesh:
         raise ValueError(
             f'Mesh for all inputs should be equal. Got one mesh: {mesh} and'
             f' another mesh: {a.sharding.mesh}')
+      mesh = a.sharding.mesh
   assert mesh is not None
 
   shapes = [aval.shape for aval in avals if aval.shape]
@@ -2574,15 +2578,12 @@ ad.defjvp2(pow_p, _pow_jvp_lhs, _pow_jvp_rhs)
 
 def _pow_lower(ctx, x, y):
   x_aval, y_aval = ctx.avals_in
-  out_aval, = ctx.avals_out
-  convert = mlir.lower_fun(
-      partial(convert_element_type, new_dtype=out_aval.dtype), False)
-  x_aval_ = x_aval.update(dtype=out_aval.dtype)
-  y_aval_ = y_aval.update(dtype=out_aval.dtype)
-  [x_] = convert(ctx.replace(avals_in=[x_aval], avals_out=[x_aval_]), x)
-  [y_] = convert(ctx.replace(avals_in=[y_aval], avals_out=[y_aval_]), y)
-  ctx_ = ctx.replace(avals_in=[x_aval_, y_aval_])
-  return _nary_lower_hlo(hlo.power, ctx_, x_, y_)
+  if x_aval.dtype != y_aval.dtype:
+    out_aval, = ctx.avals_out
+    y_aval = y_aval.update(dtype=out_aval.dtype)
+    y = hlo.convert(mlir.aval_to_ir_type(y_aval), y)
+    ctx = ctx.replace(avals_in=[x_aval, y_aval])
+  return _nary_lower_hlo(hlo.power, ctx, x, y)
 mlir.register_lowering(pow_p, _pow_lower)
 
 def _integer_pow_dtype_rule(x, *, y):
@@ -3674,6 +3675,10 @@ def _dot_general_lower(ctx, lhs, rhs, *, dimension_numbers,
   def _is_fp8_mixed_precision_matmul(_lhs_dtypes, _rhs_dtypes):
     fp8_dtypes = (dtypes.float8_e4m3fn, dtypes.float8_e5m2,
                   dtypes.float8_e5m2fnuz, dtypes.float8_e4m3fnuz)
+    if dtypes.float8_e3m4 is not None:
+      fp8_dtypes += (dtypes.float8_e3m4,)
+    if dtypes.float8_e4m3 is not None:
+      fp8_dtypes += (dtypes.float8_e4m3,)
     return _lhs_dtypes in fp8_dtypes and _rhs_dtypes in fp8_dtypes
   del preferred_element_type  # Implied by the output aval
   lhs_aval, rhs_aval = ctx.avals_in
@@ -4547,6 +4552,8 @@ def shape_as_value(shape: core.Shape):
   """Converts a shape that may contain Poly values into a JAX value."""
   if len(shape) == 0:
     return full((0,), np.array(0, np.int64))
+  if core.is_constant_shape(shape):
+    return np.asarray(shape, dtype=np.int64)
   dims = [
       expand_dims(convert_element_type(core.dimension_as_value(d), np.int64),
                   (0,))

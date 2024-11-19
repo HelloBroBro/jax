@@ -4624,6 +4624,14 @@ class ArrayPjitTest(jtu.JaxTestCase):
       jax.jit(f, out_shardings=s)(np.arange(8))
     self.assertEqual(count[0], 1)
 
+  def test_input_shardings_single_device(self):
+    @jax.jit
+    def f(x):
+      return x * 2
+
+    ins, _ = f.lower(np.arange(8)).compile().input_shardings
+    self.assertEqual(ins[0], SingleDeviceSharding(jax.devices()[0]))
+
 
 def spec_regex(s):
   return str(s).replace(r"(", r"\(").replace(r")", r"\)")
@@ -4970,6 +4978,21 @@ class ShardingInTypesTest(jtu.JaxTestCase):
 
     lowered_text = f.lower(arr).as_text()
     self.assertIn('@Sharding', lowered_text)
+
+  def test_broadcasting_nary_error(self):
+    mesh1 = Mesh([jax.devices()[0]], 'x')
+    mesh2 = Mesh([jax.devices()[0]], 'y')
+
+    arr1 = jax.device_put(np.arange(8), NamedSharding(mesh1, P()))
+    arr2 = jax.device_put(np.arange(8), NamedSharding(mesh2, P()))
+
+    @jax.jit
+    def f(x, y):
+      return x + y
+
+    with self.assertRaisesRegex(
+        ValueError, "Mesh for all inputs should be equal"):
+      f(arr1, arr2)
 
   def test_sin_unop(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
