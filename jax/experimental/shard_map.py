@@ -483,7 +483,8 @@ def _shard_map_staging(
   in_tracers = map(trace.to_jaxpr_tracer, in_tracers)
   in_avals = [t.aval for t in in_tracers]
   in_avals_ = map(partial(_shard_aval, mesh), in_names, in_avals)
-  with core.extend_axis_env_nd(list(mesh.shape.items())):
+  with (core.extend_axis_env_nd(list(mesh.shape.items())),
+        pjit.get_abstract_mesh(in_avals_)):
     jaxpr, out_avals_, consts, () = pe.trace_to_jaxpr_dynamic(f, in_avals_)
   _check_names(out_names_thunk(), out_avals_)
   if check_rep:
@@ -547,6 +548,8 @@ def _unshard_shaped_array(mesh: Mesh, names: AxisNames,
   assert isinstance(aval, core.ShapedArray)
   new_shape = tuple(sz * prod(mesh.shape[n] for n in names.get(i, ()))
                     for i, sz in enumerate(aval.shape))
+  # TODO(yashkatariya): Reset the mesh properly based on the input avals if the
+  # mesh of shard_map specifies collective axes.
   if config.sharding_in_types.value:
     spec = _names_to_pspec(names)._normalized_spec(aval.ndim)
     new_sharding = NamedSharding(AbstractMesh(mesh.shape_tuple), spec)
@@ -1547,10 +1550,11 @@ def _promote_scalar_residuals_jaxpr(jaxpr, which):
   return jaxpr
 
 
-def _unmentioned2(mesh: Mesh, names: AxisNames) -> list[AxisName]:
+def _unmentioned2(mesh: Mesh, names: AxisNames,
+                  auto: frozenset[AxisName]) -> list[AxisName]:
   # We use a filtered-down version of unmentioned to avoid defensive-psum over
   # more chips than required in the transpose-no-check-rep case.
-  name_set = {n for ns in names.values() for n in ns}
+  name_set = {n for ns in names.values() for n in ns} | auto
   return [n for n in _all_mesh_names_except_spmd(mesh) if n not in name_set]
 
 
@@ -1559,7 +1563,7 @@ def _shard_map_transpose(out_cts, *args, jaxpr, mesh, in_names, out_names,
   mb_div = lambda x, y: x / y if y != 1 else x
   out_cts = [ad.Zero(_shard_aval(mesh, ns, x.aval)) if type(x) is ad.Zero
       else x if rewrite or dtypes.dtype(x) == dtypes.float0
-      else mb_div(x, prod(map(mesh.shape.get, _unmentioned2(mesh, ns))))
+      else mb_div(x, prod(map(mesh.shape.get, _unmentioned2(mesh, ns, auto))))
       for ns, x in zip(out_names, out_cts)]
   args = [x if type(x) is not ad.UndefinedPrimal else
           ad.UndefinedPrimal(_shard_aval(mesh, ns, x.aval))
@@ -1577,7 +1581,7 @@ def _shard_map_transpose(out_cts, *args, jaxpr, mesh, in_names, out_names,
     )
     out = [ad.Zero(_unshard_aval(mesh, ns, x.aval)) if type(x) is ad.Zero
         else x if rewrite
-        else jax.lax.psum(x, tuple(_unmentioned2(mesh, ns)))
+        else jax.lax.psum(x, tuple(_unmentioned2(mesh, ns, auto)))
         for ns, x in zip(in_names, out)]
     return out
 

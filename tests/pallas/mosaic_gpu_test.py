@@ -676,6 +676,22 @@ class PallasCallTest(PallasTest):
 
     np.testing.assert_array_equal(kernel(), jnp.full([256], 5, dtype=jnp.int32))
 
+  def test_fori_loop_dynamic_bounds(self):
+
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct([256], jnp.int32),
+        grid=(1,)
+    )
+    def kernel(o_ref):
+      zero = pl.program_id(0)
+      # Equivalent to 2 + 3.
+      o_ref[...] = jax.lax.broadcast(
+          jax.lax.fori_loop(2 + zero, 4 + zero, lambda i, x: x + i, 0), o_ref.shape
+      )
+
+    np.testing.assert_array_equal(kernel(), jnp.full([256], 5, dtype=jnp.int32))
+
   def test_fori_loop_tuple(self):
     @functools.partial(
         pl.pallas_call,
@@ -1052,6 +1068,30 @@ class PallasCallTest(PallasTest):
         self.assertEqual(data.count('"name": "store"'), 2)
       np.testing.assert_array_equal(y, x + x)
 
+  @parameterized.parameters(
+      (jnp.float16, jnp.float16),  # Noop
+      (jnp.int16, jnp.bfloat16),
+      (jnp.int16, jnp.float16),
+      (jnp.uint16, jnp.float16),
+      (jnp.float32, jnp.int32),
+      (jnp.float32, jnp.uint32),
+      (jnp.uint32, jnp.int32),
+      (jnp.int32, jnp.uint32),
+  )
+  def test_bitcast_convert_type(self, in_dtype, out_dtype):
+    m, n = 16, 8
+    out_shape = jax.ShapeDtypeStruct((m, n), out_dtype)
+    grid = ()
+
+    @functools.partial(pl.pallas_call, out_shape=out_shape, grid=grid)
+    def convert(x_ref, y_ref):
+      y_ref[...] = jax.lax.bitcast_convert_type(x_ref[...], out_shape)
+
+    x = jnp.arange(m * n, dtype=in_dtype).reshape((m, n))
+    y = convert(x)
+    y_ref = jax.lax.bitcast_convert_type(x, out_dtype)
+    np.testing.assert_array_equal(y, y_ref)
+
 
 class PipelineTest(PallasTest):
 
@@ -1178,33 +1218,33 @@ class PipelineTest(PallasTest):
     np.testing.assert_array_equal(kernel_fn(x)[:, :16], y[:, :16])
 
   def test_emit_with_parallel_grid(self):
-    self.skipTest("Enable once we support multiple levels of indexing")
-
-    num_steps = 4
+    num_steps1 = 4
+    num_steps2 = 5
 
     def kernel(x_gmem, o_gmem):
-      gmem_slice = pl.ds(pl.program_id(0) * 32, 32)
+      pid = pl.program_id(0)
       plgpu.emit_pipeline(
           kernel_body,
-          in_specs=[pl.BlockSpec((32, 16), lambda i: (0, i))],
-          out_specs=[pl.BlockSpec((32, 16), lambda i: (0, i))],
-          grid=(num_steps,),
+          in_specs=[pl.BlockSpec((32, 16), lambda i: (pid, i))],
+          out_specs=[pl.BlockSpec((32, 16), lambda i: (pid, i))],
+          grid=(num_steps2,),
           max_concurrent_steps=2,
-      )(x_gmem.at[gmem_slice], o_gmem.at[gmem_slice])
+      )(x_gmem, o_gmem)
 
     def kernel_body(x_smem, o_smem):
       o_smem[...] = x_smem[...] + 1.0
 
-    x = jnp.arange(4 * 32 * num_steps * 16)
-    x = x.reshape(-1, num_steps * 16).astype(jnp.float32)
+    x = jnp.arange(num_steps1 * 32 * num_steps2 * 16)
+    x = x.reshape(-1, num_steps2 * 16).astype(jnp.float32)
     kernel_fn = pl.pallas_call(
         kernel,
         in_specs=[pl.BlockSpec(memory_space=plgpu.GMEM)],
         out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
         out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-        grid=(4, 1),
+        grid=(num_steps1,),
     )
-    np.testing.assert_array_equal(kernel_fn(x), x + 1.0)
+    y = x + 1.0
+    np.testing.assert_array_equal(kernel_fn(x), y)
 
   def test_emit_with_2d_grid(self):
     num_steps1 = 4

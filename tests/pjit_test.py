@@ -5285,6 +5285,147 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     self.assertArraysEqual(out, (np_inp @ np_inp.T) * 2)
     self.assertEqual(out.sharding, NamedSharding(mesh, P('x', None)))
 
+  def test_slice(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16.).reshape(4, 4)
+    arr = jax.device_put(np_inp, NamedSharding(mesh, P('x', None)))
+
+    @jax.jit
+    def f(x):
+      y = lax.slice(x, (0, 0), (4, 3))
+      self.assertEqual(y.sharding.spec, P('x', None))
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('x', None)))
+    self.assertIn('@Sharding', f.lower(arr).as_text())
+
+    def g(x):
+      out = f(x)
+      return jnp.square(jnp.sum(out))
+
+    out = jax.grad(g)(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    out = jax.jit(jax.grad(g))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    with self.assertRaisesRegex(NotImplementedError, "slicing on sharded dims"):
+      f(jax.device_put(np_inp, NamedSharding(mesh, P('x', 'y'))))
+
+    with self.assertRaisesRegex(NotImplementedError, "slicing on sharded dims"):
+      f(jax.device_put(np_inp, NamedSharding(mesh, P(None, ('x', 'y')))))
+
+  def test_squeeze(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16.).reshape(4, 4, 1)
+    arr = jax.device_put(np_inp, NamedSharding(mesh, P('x', None, None)))
+
+    @jax.jit
+    def f(x):
+      y = lax.squeeze(x, (2,))
+      self.assertEqual(y.sharding.spec, P('x', None))
+      return y
+
+    out = f(arr)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('x', None)))
+    self.assertIn('@Sharding', f.lower(arr).as_text())
+    self.assertArraysEqual(out, np.squeeze(np_inp, axis=2))
+
+    def g(x):
+      out = f(x)
+      return jnp.square(jnp.sum(out))
+
+    out = jax.grad(g)(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    out = jax.jit(jax.grad(g))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+  def test_pad(self):
+    mesh = jtu.create_mesh((2, 1), ('x', 'y'))
+    np_inp = np.arange(8.)
+    arr = jax.device_put(np_inp, NamedSharding(mesh, P('x')))
+
+    @partial(jax.jit, static_argnums=(1, 2))
+    def f(x, padding_config, spec):
+      y = lax.pad(x, 0., padding_config)
+      self.assertEqual(y.sharding.spec, spec)
+      return y
+
+    out = f(arr, ((2, 2, 0),), P('x'))
+    self.assertArraysEqual(out, np.pad(np_inp, 2))
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('x')))
+    self.assertIn('@Sharding', f.lower(arr, ((2, 2, 0),), P('x')).as_text())
+
+    out = f(arr, ((0, 0, 0),), P('x'))
+    self.assertArraysEqual(out, np_inp)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('x')))
+
+    f(arr, ((0, 3, 1), ), P('x'))  # doesn't crash
+
+    def g(x):
+      out = f(x, ((2, 2, 0),), P('x'))
+      return jnp.square(jnp.sum(out))
+
+    out = jax.grad(g)(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    out = jax.jit(jax.grad(g))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    with self.assertRaisesRegex(NotImplementedError, "padding on sharded dims"):
+      f(arr, ((2, 3, 0), ), None)
+
+    with self.assertRaisesRegex(NotImplementedError, "padding on sharded dims"):
+      f(arr, ((0, 3, 0), ), None)
+
+    with self.assertRaisesRegex(NotImplementedError, "padding on sharded dims"):
+      arr = jax.device_put(np_inp, NamedSharding(mesh, P(('x', 'y'))))
+      f(arr, ((4, 4, 1),), None)
+
+  def test_concatenate(self):
+    mesh = jtu.create_mesh((2, 1), ('x', 'y'))
+    np_inp = np.arange(16.).reshape(4, 4)
+    s = NamedSharding(mesh, P('x', 'y'))
+    arr1 = jax.device_put(np_inp, s)
+    arr2 = jax.device_put(np.arange(4.).reshape(4, 1), s)
+
+    @partial(jax.jit, static_argnums=2)
+    def f(x, y, method='jnp'):
+      if method == 'jnp':
+        y = jnp.concatenate([x, y], axis=1)
+      else:
+        assert method == 'lax'
+        y = lax.concatenate([x, y], dimension=1)
+      self.assertEqual(y.sharding.spec, P('x', 'y'))
+      return y
+
+    out = f(arr1, arr2)
+    self.assertEqual(out.sharding, s)
+    self.assertArraysEqual(out, np.concatenate([arr1, arr2], axis=1))
+    self.assertIn('@Sharding', f.lower(arr1, arr2).as_text())
+
+    out = f(arr1, arr2, method='lax')
+    self.assertEqual(out.sharding, s)
+    self.assertArraysEqual(out, np.concatenate([arr1, arr2], axis=1))
+
+    with self.assertRaisesRegex(
+        TypeError, "All operands should have the same sharding"):
+      arr3 = jax.device_put(np.arange(4.).reshape(4, 1),
+                            NamedSharding(mesh, P('x')))
+      f(arr1, arr3)
+
+    def g(x, y):
+      out = f(x, y)
+      return jnp.square(jnp.sum(out))
+
+    out = jax.grad(g)(arr1, arr2)
+    self.assertEqual(out.sharding, s)
+
+    out = jax.jit(jax.grad(g))(arr1, arr2)
+    self.assertEqual(out.sharding, s)
+
 
 @jtu.pytest_mark_if_available('multiaccelerator')
 class PJitErrorTest(jtu.JaxTestCase):
