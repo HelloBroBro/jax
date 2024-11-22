@@ -2400,11 +2400,15 @@ def _sin_lowering(ctx, x):
     return sine(ctx, x)
   return _nary_lower_hlo(hlo.sine, ctx, x)
 
+def _sin_p_lin(_, x):
+  cos_x = cos(x) # TODO: allow this to happen in the linearized computation (need to fix backward_pass)
+  return (sin_p.bind(x), True, cos_x, lambda cos_x_, t: mul(t, cos_x_))
+
 sin_p = standard_unop(_float | _complex, 'sin')
 ad.defjvp(sin_p, lambda g, x: mul(g, cos(x)))
+ad.primitive_linearizations[sin_p] = _sin_p_lin
 mlir.register_lowering(sin_p, _sin_lowering)
 batching.ragged_prop_rules[sin_p] = batching.ragged_mask_elementwise_rule
-
 
 def _cos_complex(x):
   # cos(x) = complex(cos(real(x)) * cosh(imag(x)), -sin(real(x)) * sinh(imag(x)))
@@ -4509,18 +4513,8 @@ def _pad_sharding_rule(operand, padding_value, *, padding_config):
   # change this logic to `return operand.sharding` directly.
   out_shape = _pad_shape_rule(operand, padding_value,
                               padding_config=padding_config)
-  mesh = operand.sharding.mesh
-  new_spec = []
-  for op_sh, out_sh, op_spec in safe_zip(
-      operand.shape, out_shape, operand.sharding.spec):
-    if (op_sh != out_sh and op_spec is not None and
-        out_sh % slicing._get_sub_spec_size(mesh, op_spec) != 0):
-      raise NotImplementedError(
-          f"padding on sharded dims where out dim ({out_sh}) is not divisble by"
-          f" mesh axes ({slicing._get_sub_spec_size(mesh, op_spec)}) with spec"
-          f" ({op_spec}) is not implemented.")
-    new_spec.append(op_spec)
-  return NamedSharding(mesh, P(*new_spec))
+  return slicing._get_sharding_for_varying_out_shape(
+      out_shape, operand, 'padding')
 
 
 def _pad_transpose(t, operand, padding_value, *, padding_config):
