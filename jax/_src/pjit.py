@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence, Iterable
-import contextlib
 import dataclasses
 from functools import partial
 import inspect
@@ -696,7 +695,7 @@ def _infer_params_impl(
 
 def get_abstract_mesh(in_avals):
   if not config.sharding_in_types.value:
-    return contextlib.nullcontext()
+    return mesh_lib.null_mesh_context()
   m = None
   for a in in_avals:
     # TODO(yashkatariya): Remove this when mesh context can be set by the user.
@@ -709,7 +708,7 @@ def get_abstract_mesh(in_avals):
     m = a.sharding.mesh  # type: ignore
   # TODO(yashkatariya): Remove this when mesh context can be set by the user.
   if m is None:
-    return contextlib.nullcontext()
+    return mesh_lib.null_mesh_context()
   assert m is not None
   return m
 
@@ -1665,7 +1664,8 @@ def _pjit_call_impl_python(
   compiler_options_kvs = compiler_options_kvs + tuple(pgle_compile_options.items())
   # TODO(patrios): Do not pass mutable profile session through cached lowering
   # chain. Instead we need to move profilers dictionary to pxla module and use
-  # module as key. Right now we can't do that since there is no way to evict _pjit_lower_cached cache for in PGLE mode.
+  # module as key. Right now we can't do that since there is no way to evict
+  # _pjit_lower_cached cache for in PGLE mode.
   compiled = _resolve_and_lower(
       args, jaxpr=jaxpr, in_shardings=in_shardings,
       out_shardings=out_shardings, in_layouts=in_layouts,
@@ -1776,12 +1776,7 @@ def _pjit_call_impl(*args, jaxpr,
 pjit_p.def_impl(_pjit_call_impl)
 
 
-def _pjit_lower(*args, **kwargs):
-  return _pjit_lower_cached(*args, **kwargs)
-
-
-@weakref_lru_cache
-def _pjit_lower_cached(
+def _pjit_lower(
     jaxpr: core.ClosedJaxpr,
     in_shardings,
     out_shardings,

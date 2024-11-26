@@ -463,8 +463,8 @@ class FragmentedArray:
 
     if (_is_signed is not None) != ir.IntegerType.isinstance(self.mlir_dtype):
       raise TypeError(
-          "is_signed must only be non-None if the MLIR type is an integer"
-          f" type, got {_is_signed=} for {self.mlir_dtype}"
+          "is_signed must be non-None if and only if the MLIR type is an"
+          f" integer type, got {_is_signed=} for {self.mlir_dtype}"
       )
 
     match self.layout:
@@ -622,38 +622,28 @@ class FragmentedArray:
         reg, self.shape, new_layout, is_signed=self.is_signed
     )
 
-  def _pointwise(self, op, *other, output_is_signed: bool | None = None):
-    if isinstance(self.layout, WGSplatFragLayout):
-      # Find either the largest operand or an operand that has a
-      # concrete layout base the layout computation of that.
-      widest_idx = None
+  def _pointwise(self, op, *other, output_is_signed: bool | None = None, force_no_dispatch=False):
+    # If our layout is a splat, then we should either dispatch to a non-splat
+    # layout, or broadcast ourselves to the output shape first.
+    if not force_no_dispatch and isinstance(self.layout, WGSplatFragLayout):
+      output_shape = self.shape
       for i, o in enumerate(other):
         if not isinstance(o, FragmentedArray):
           continue
         elif not isinstance(o.layout, WGSplatFragLayout):
-          widest_idx = i
-          break
-        elif not o.layout.can_broadcast_to(self.layout.shape):
-          # Note: equal shapes can be broadcast to each other. Using
-          # the negation we make sure to only consider strictly larger
-          # shapes so that we don't end up ping ponging between equal
-          # shapes.
-          widest_idx = i
-
-      if widest_idx is not None:
-        # We need to retain the order of arguments that the op
-        # expects.
-        def _op(wide_o, self_o, *args):
-          pre_wide = args[:widest_idx - 1]
-          post_wide = args[widest_idx - 1:]
-          return op(self_o, *pre_wide, wide_o, *post_wide)
-        return other[widest_idx]._pointwise(
-            _op,
-            self,
-            *other[:widest_idx],
-            *other[widest_idx + 1:],
-            output_is_signed=output_is_signed,
-        )
+          return o._pointwise(
+              lambda o, *args: op(*args[:i], o, *args[i:]),
+              self,
+              *other[:i],
+              *other[i + 1 :],
+              output_is_signed=output_is_signed,
+          )
+        else:
+          output_shape = np.broadcast_shapes(output_shape, o.shape)
+      # If we get here then we haven't found any non-splat layout.
+      return self.broadcast(output_shape)._pointwise(
+          op, *other, output_is_signed=output_is_signed, force_no_dispatch=True,
+      )
 
     other_arrs = []
     for o in other:
@@ -894,7 +884,17 @@ class FragmentedArray:
           arith.maxsi if self.is_signed else arith.maxui, other
       )
     else:
-      return NotImplemented
+      return NotImplementedError
+
+  def min(self, other):
+    if ir.FloatType.isinstance(self.mlir_dtype):
+      return self._pointwise(arith.minimumf, other)
+    elif ir.IntegerType.isinstance(self.mlir_dtype):
+      return self._pointwise(
+          arith.minsi if self.is_signed else arith.minui, other
+      )
+    else:
+      return NotImplementedError
 
   def exp(self, *, approx: bool = False):
     if not ir.FloatType.isinstance(self.mlir_dtype):
@@ -926,6 +926,15 @@ class FragmentedArray:
       raise NotImplementedError
     return self._pointwise(
         self._lift_fast_unary("cos.approx.f32") if approx else mlir_math.cos
+    )
+
+  def tanh(self, *, approx: bool = False):
+    if not ir.FloatType.isinstance(self.mlir_dtype):
+      raise NotImplementedError
+    if approx and self.mlir_dtype != ir.F32Type.get():
+      raise NotImplementedError
+    return self._pointwise(
+        self._lift_fast_unary("tanh.approx.f32") if approx else mlir_math.tanh
     )
 
   def rsqrt(self, *, approx: bool = False):
@@ -962,6 +971,12 @@ class FragmentedArray:
     return fast_instr
 
   def bitcast(self, elt: ir.Type, *, output_is_signed: bool | None = None):
+    if (output_is_signed is not None) != ir.IntegerType.isinstance(elt):
+      raise TypeError(
+          "output_is_signed must be non-None if and only if the MLIR type is an"
+          f" integer type, got {output_is_signed=} for {elt}"
+      )
+
     if elt == self.mlir_dtype:
       return self
     reg_type = self.registers.flat[0].type

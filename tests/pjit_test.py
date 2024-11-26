@@ -52,7 +52,6 @@ from jax._src import sharding_impls
 from jax._src.sharding_impls import (
     AUTO, UNSPECIFIED, NamedSharding, GSPMDSharding, PositionalSharding,
     SingleDeviceSharding, parse_flatten_op_sharding)
-import jax._src.pjit as pjit_lib
 from jax._src.pjit import pjit
 from jax._src import mesh as mesh_lib
 from jax._src.interpreters import pxla
@@ -1900,11 +1899,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
   )
   def test_pjit_array_multi_input_multi_output(self, mesh_shape, s1_shape,
                                                s2_shape, s3_shape, s4_shape):
-    if config.use_shardy_partitioner.value:
-      self.skipTest(
-          'TODO(b/355263220) Shardy conflict resolution is not complete. Issue '
-          'here is that for `a1 @ a1.T` GSPMD gives dim 0 sharded on `x` while '
-          'Shardy gives it fully replicated.')
     global_mesh = jtu.create_mesh(mesh_shape, ('x', 'y'))
     global_input_shape = (8, 2)
 
@@ -2162,13 +2156,13 @@ class ArrayPjitTest(jtu.JaxTestCase):
       return x + y
 
     out = add(a, b)
-    cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info1 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertIsInstance(out, array.ArrayImpl)
     self.assertArraysEqual(out, a + b)
     self.assertFalse(out._committed)
 
     out2 = add(out, out)
-    cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info2 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertIsInstance(out2, array.ArrayImpl)
     self.assertArraysEqual(out2, 2 * (a + b))
     self.assertFalse(out2._committed)
@@ -2178,7 +2172,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     c = jax.device_put(a, jax.devices()[0])
     out3 = add(c, c)
-    cache_info3 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info3 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertArraysEqual(out3, 2 * c)
     self.assertTrue(out3._committed)
 
@@ -2221,14 +2215,11 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     f = pjit(lambda x: x)
 
-    out1 = f(a)
-    cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
+    with jtu.count_jit_compilation_cache_miss() as count:
+      out1 = f(a)
+      out2 = f(b)
+    self.assertEqual(count[0], 2)
 
-    out2 = f(b)
-    cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
-
-    self.assertEqual(cache_info2.hits, cache_info1.hits)
-    self.assertEqual(cache_info2.misses, cache_info1.misses + 1)
     self.assertArraysEqual(out1, val1)
     self.assertArraysEqual(out2, val2)
 
@@ -2885,13 +2876,13 @@ class ArrayPjitTest(jtu.JaxTestCase):
       return x, y, z
 
     o1, o2, o3 = f(a, y=b, z=c)
-    cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info1 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertArraysEqual(o1, a)
     self.assertArraysEqual(o2, b)
     self.assertArraysEqual(o3, c)
 
     o4, o5, o6 = f(x=a, y=b, z=c)
-    cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info2 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertArraysEqual(o4, a)
     self.assertArraysEqual(o5, b)
     self.assertArraysEqual(o6, c)
@@ -2900,7 +2891,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertEqual(cache_info2.misses, cache_info1.misses + 1)
 
     o7, o8, o9 = f(a, b, c)
-    cache_info3 = pjit_lib._pjit_lower_cached.cache_info()
+    cache_info3 = pxla._cached_lowering_to_hlo.cache_info()
     self.assertArraysEqual(o7, a)
     self.assertArraysEqual(o8, b)
     self.assertArraysEqual(o9, c)
@@ -2987,25 +2978,18 @@ class ArrayPjitTest(jtu.JaxTestCase):
     x = jnp.arange(8).reshape(4, 2)
     f_out = f(x)
     f_out2 = f(f_out)
-    cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
     _check(f_out, jax.devices()[1], x)
     _check(f_out2, jax.devices()[1], f_out)
 
     y = jax.device_put(x, jax.sharding.NamedSharding(mesh, P('x', 'y')))
     out2 = f(y)
-    cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
     _check(out2, jax.devices()[1], y)
-
-    self.assertEqual(cache_info2.hits, cache_info1.hits + 1)
 
     with jtu.ignore_warning(category=DeprecationWarning,
                             message="backend and device argument"):
       h = pjit(mul, device=jax.devices()[-1])
     h_out = h(y)
-    cache_info3 = pjit_lib._pjit_lower_cached.cache_info()
     _check(h_out, jax.devices()[-1], y)
-
-    self.assertEqual(cache_info3.hits, cache_info2.hits)
 
     # AOT test
     compiled = f.lower(core.ShapedArray(y.shape, y.dtype)).compile()
@@ -3536,11 +3520,11 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     with jtu.count_pjit_cpp_cache_miss() as count:
       out = f(arr)
-      cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
+      cache_info1 = pxla._cached_lowering_to_hlo.cache_info()
       self.assertIsInstance(out.sharding, NamedSharding)
 
       out2 = f(np_arr)
-      cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
+      cache_info2 = pxla._cached_lowering_to_hlo.cache_info()
       self.assertIsInstance(out2.sharding, NamedSharding)
 
     # Drops out of C++ cache i.e. cache miss
@@ -3629,13 +3613,11 @@ class ArrayPjitTest(jtu.JaxTestCase):
     f = jax.jit(lambda x: x * 2)
     out = f(arr)
     cache_info1 = pxla._cached_compilation.cache_info()
-    pl_cache_info1 = pjit_lib._pjit_lower_cached.cache_info()
     self.assertIsInstance(out.sharding, NamedSharding)
 
     with jtu.count_pjit_cpp_cache_miss() as count:
       out2 = f(arr2)
       cache_info2 = pxla._cached_compilation.cache_info()
-      pl_cache_info2 = pjit_lib._pjit_lower_cached.cache_info()
       self.assertIsInstance(out2.sharding, PositionalSharding)
 
       # This will hit the cpp cache.
@@ -3645,9 +3627,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
 
     self.assertEqual(cache_info2.hits, cache_info1.hits + 1)
     self.assertEqual(cache_info2.misses, cache_info1.misses)
-
-    self.assertEqual(pl_cache_info2.hits, pl_cache_info1.hits)
-    self.assertEqual(pl_cache_info2.misses, pl_cache_info1.misses + 1)
 
     out4 = jnp.sum(arr)
     self.assertIsInstance(out4.sharding, NamedSharding)
@@ -5168,31 +5147,37 @@ class ShardingInTypesTest(jtu.JaxTestCase):
   @parameterized.named_parameters(
       ('1', (16, 1), (1, 16, 1), P('x', None), P(None, 'x', None), False),
       ('2', (8, 2, 1), (1, 16, 1), P('x', None, None), P(None, 'x', None), True),
-      ('3', (8, 1), (1, 4, 2), P('x', None), P(None, 'x', None), True)
+      ('3', (8, 1), (1, 4, 2), P('x', None), P(None, None, 'x'), True)
   )
-  def test_reshape(self, src_shape, dst_shape, src_spec, dst_spec, will_error):
+  def test_reshape(self, src_shape, dst_shape, src_spec, dst_spec,
+                   use_sharding_arg):
     mesh = jtu.create_mesh((2,), ('x',))
     np_inp = np.arange(math.prod(src_shape),
                        dtype=np.float32).reshape(src_shape)
     arr = jax.device_put(np_inp, NamedSharding(mesh, src_spec))
 
-    @jax.jit
-    def f(x):
-      y = jnp.reshape(x, dst_shape)
+    @partial(jax.jit, static_argnums=1)
+    def f(x, new_sharding):
+      y = lax.reshape(x, dst_shape, sharding=new_sharding)
       y = y * 2
       self.assertEqual(y.sharding.spec, dst_spec)
       return y
 
-    if will_error:
-      with self.assertRaises(NotImplementedError):
-        f(arr)
-    else:
-      out = f(arr)
-      self.assertEqual(out.sharding, NamedSharding(mesh, dst_spec))
-      self.assertArraysEqual(out, np_inp.reshape(dst_shape) * 2)
+    new_s = (NamedSharding(mesh.abstract_mesh, dst_spec)
+             if use_sharding_arg else None)
+    out = f(arr, new_s)
+    self.assertEqual(out.sharding, NamedSharding(mesh, dst_spec))
+    self.assertArraysEqual(out, np_inp.reshape(dst_shape) * 2)
 
-      lowered_text = f.lower(arr).as_text()
-      self.assertIn('@Sharding', lowered_text)
+    lowered_text = f.lower(arr, new_s).as_text()
+    self.assertIn('@Sharding', lowered_text)
+
+    def g(x):
+      out = f(x, new_s)
+      return jnp.square(jnp.sum(out))
+
+    out = jax.jit(jax.grad(g))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
 
   def test_select(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
