@@ -1079,14 +1079,20 @@ else:
     def __init__(self, name):
       self._name = name
 
+    @property
     def value(self):
-      return getattr(jax_jit.thread_local_state().extra_jit_context, self._name)
+      return self.get_local()
 
     def get_local(self):
       return getattr(jax_jit.thread_local_state().extra_jit_context, self._name)
 
     def set_local(self, value):
       update_thread_local_jit_state(**{self._name: value})
+
+    def swap_local(self, new_value):
+      prev_value = self.value
+      self.set_local(new_value)
+      return prev_value
 
   trace_state = JitConfig('trace_state')
   axis_env_state = JitConfig('axis_env_state')
@@ -1999,4 +2005,16 @@ gpu_use_magma = enum_state(
         'See the documentation for lax.linalg.eig for more details about how '
         'to use this feature.'
     ),
+)
+
+exec_time_optimization_effort = float_state(
+    name='jax_exec_time_optimization_effort',
+    default=0.0,
+    help='Effort for minimizing execution time (higher means more effort), valid range [-1.0, 1.0].'
+)
+
+memory_fitting_effort = float_state(
+    name='jax_memory_fitting_effort',
+    default=0.0,
+    help='Effort for minimizing memory usage (higher means more effort), valid range [-1.0, 1.0].'
 )

@@ -142,6 +142,7 @@ def _estimate_resources(jaxpr: jax_core.Jaxpr) -> Resources:
       # Assume that unsupported primitives are neutral wrt resource usage.
       continue
     rs |= rule(*(invar.aval for invar in eqn.invars), **eqn.params)
+
   return rs
 
 
@@ -1038,10 +1039,15 @@ def _ndindexer_indices(indexer: indexing.NDIndexer) -> tuple[gpu_core.Index, ...
 def _get_lowering_rule(ctx: LoweringRuleContext, x_smem, *leaves, tree):
   if not isinstance(x_smem, ir.Value) and ir.MemRefType.isinstance(x_smem):
     raise TypeError(f"Can only load from references (got {x_smem}).")
+
   x_aval = ctx.avals_in[0]
+
   transforms = jax.tree.unflatten(tree, leaves)
   x_smem, transforms = _handle_reshaping(x_smem, transforms)
   x_smem, transforms = _handle_indexing(x_smem, transforms)
+
+  print("ctx:", ctx)
+  print("transforms:", transforms)
   match transforms:
     case (gpu_core.UnswizzleRef(swizzle), gpu_core.UntileRef(tiling)):
       if tiling != (64, swizzle // x_aval.dtype.itemsize):
@@ -1050,6 +1056,12 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_smem, *leaves, tree):
           x_smem, is_signed=mgpu_utils.is_signed(x_aval.dtype), swizzle=swizzle
       )
     case ():
+      # Handle scalar indexing.
+      if not ctx.avals_out[0].shape:
+        is_signed = mgpu_utils.is_signed(x_aval.dtype)
+        val = memref_dialect.load(x_smem, [])
+        return mgpu.FragmentedArray.splat(val, shape=(), is_signed=is_signed)
+
       return mgpu.FragmentedArray.load_strided(
           x_smem, is_signed=mgpu_utils.is_signed(x_aval.dtype)
       )
@@ -1592,6 +1604,15 @@ def _while_lowering_rule(
 def _cond_lowering_rule(ctx: LoweringRuleContext, index, *args, branches):
   index_aval, *_arg_avals = ctx.avals_in
 
+  def _yielded_values(outs, avals):
+    ret = []
+    for out, aval in zip(outs, avals):
+      if isinstance(out, mgpu.FragmentedArray):
+        ret.append(out)
+      else:
+        ret.append(_ensure_ir_value(out, aval.dtype))
+    return ret
+
   # We need the branch return mlir types in order to construct the
   # switch operation. To avoid leaking information about what kind of
   # mlir types are internal to FragmentedArrays and other mgpu types,
@@ -1601,10 +1622,7 @@ def _cond_lowering_rule(ctx: LoweringRuleContext, index, *args, branches):
     outs = lower_jaxpr_to_mosaic_gpu(
         ctx.module_ctx, ctx.launch_ctx, branches[0].jaxpr, args
     )
-    yielded_types, _ = jax.tree.flatten([
-        (_ensure_ir_value(out, aval.dtype) or out).type
-        for out, aval in zip(outs, ctx.avals_out)
-    ])
+    yielded_types = [v.type for v in jax.tree.leaves(_yielded_values(outs, ctx.avals_out))]
 
   switch_op = scf_dialect.IndexSwitchOp(
       yielded_types,
@@ -1626,11 +1644,7 @@ def _cond_lowering_rule(ctx: LoweringRuleContext, index, *args, branches):
           ctx.module_ctx, ctx.launch_ctx, branch.jaxpr, args, consts=branch.consts
       )
 
-      yielded = [
-          _ensure_ir_value(out, aval.dtype) or out
-          for out, aval in zip(outs, ctx.avals_out)
-      ]
-      yielded_leaves, yielded_treedef = jax.tree.flatten(yielded)
+      yielded_leaves, yielded_treedef = jax.tree.flatten(_yielded_values(outs, ctx.avals_out))
       if treedef is None:
         treedef = yielded_treedef
       else:
@@ -1665,6 +1679,12 @@ def _bitcast_convert_type_lowering_rule(
   return mgpu.FragmentedArray.bitcast(
       operand, dst_elem_type, output_is_signed=output_is_signed
   )
+
+
+@register_lowering_rule(lax.optimization_barrier_p)
+def _optimization_barrier_lowering(ctx: LoweringRuleContext, *args):
+  args = (_ensure_fa(arg, aval.dtype) for arg, aval in zip(args, ctx.avals_in))
+  return mgpu.optimization_barrier(*args)
 
 
 def _bcast(
